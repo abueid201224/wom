@@ -1,0 +1,10 @@
+{
+  "name": "WMS Auditor",
+  "description": "Offline-first warehouse operations, barcode invoice auditing, inbound receiving, RMA returns, cycle counting, and batch wave picking with Firebase Cloud Sync.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
