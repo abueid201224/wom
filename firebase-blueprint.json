@@ -1,125 +1,144 @@
 {
   "entities": {
-    "ReturnReport": {
-      "title": "ReturnReport",
-      "description": "Warehouse quality inspection, refund, and customer RMA return report",
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "User preferences, language, scanner thresholds, and auditor profile stored under /users/{userId}/settings/current",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "returnReceiptNo": { "type": "string", "maxLength": 128 },
-        "originalInvoiceNo": { "type": "string", "maxLength": 128 },
-        "orderNo": { "type": "string", "maxLength": 128 },
-        "customerName": { "type": "string", "maxLength": 256 },
-        "paymentMethod": { "type": "string", "maxLength": 64 },
+        "userId": { "type": "string" },
+        "language": { "type": "string", "enum": ["ar", "en"] },
+        "soundEnabled": { "type": "boolean" },
+        "vibrationEnabled": { "type": "boolean" },
+        "longBarcodeThreshold": { "type": "integer" },
+        "auditorName": { "type": "string" },
+        "auditorId": { "type": "string" },
+        "auditorTitle": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "language", "soundEnabled", "vibrationEnabled", "longBarcodeThreshold", "auditorName", "auditorId", "auditorTitle", "updatedAt"]
+    },
+    "ReturnReport": {
+      "title": "ReturnReport",
+      "description": "RMA customer return and lab inspection archive under /users/{userId}/returns/{returnId}",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "returnReceiptNo": { "type": "string" },
+        "originalInvoiceNo": { "type": "string" },
+        "orderNo": { "type": "string" },
+        "customerName": { "type": "string" },
+        "paymentMethod": { "type": "string" },
         "status": { "type": "string", "enum": ["COMPLETED_WAREHOUSE", "PENDING_LAB", "DRAFT"] },
         "totalRefundAmount": { "type": "number" },
-        "auditorName": { "type": "string", "maxLength": 128 },
-        "createdAt": { "type": "string", "maxLength": 64 },
-        "userId": { "type": "string", "maxLength": 128 }
+        "totalItems": { "type": "integer" },
+        "auditorName": { "type": "string" },
+        "itemsJson": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAtIso": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "returnReceiptNo", "status", "createdAt", "userId"]
+      "required": ["userId", "returnReceiptNo", "originalInvoiceNo", "orderNo", "customerName", "paymentMethod", "status", "totalRefundAmount", "totalItems", "auditorName", "itemsJson", "notes", "createdAtIso", "createdAt", "updatedAt"]
     },
     "AuditDiscrepancy": {
       "title": "AuditDiscrepancy",
-      "description": "Logged warehouse discrepancy during invoice dispatch audit",
+      "description": "ISA 500 discrepancy record under /users/{userId}/audit_discrepancies/{discrepancyId}",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "invoiceNo": { "type": "string", "maxLength": 128 },
-        "orderNo": { "type": "string", "maxLength": 128 },
-        "itemCode": { "type": "string", "maxLength": 128 },
-        "itemName": { "type": "string", "maxLength": 256 },
-        "requiredQty": { "type": "number" },
-        "actualQty": { "type": "number" },
-        "codeStatus": { "type": "string", "maxLength": 64 },
-        "qtyStatus": { "type": "string", "maxLength": 64 },
-        "difference": { "type": "number" },
-        "auditedAt": { "type": "string", "maxLength": 64 },
-        "userId": { "type": "string", "maxLength": 128 }
+        "userId": { "type": "string" },
+        "invoiceNo": { "type": "string" },
+        "orderNo": { "type": "string" },
+        "itemCode": { "type": "string" },
+        "itemName": { "type": "string" },
+        "unit": { "type": "string" },
+        "requiredQty": { "type": "integer" },
+        "actualQty": { "type": "integer" },
+        "difference": { "type": "integer" },
+        "codeStatus": { "type": "string", "enum": ["MATCH", "MISMATCH"] },
+        "qtyStatus": { "type": "string", "enum": ["EXACT", "SHORTAGE", "SURPLUS"] },
+        "auditorId": { "type": "string" },
+        "auditedAtIso": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "invoiceNo", "itemCode", "auditedAt", "userId"]
+      "required": ["userId", "invoiceNo", "orderNo", "itemCode", "itemName", "unit", "requiredQty", "actualQty", "difference", "codeStatus", "qtyStatus", "auditorId", "auditedAtIso", "createdAt", "updatedAt"]
     },
     "ReceivingReport": {
       "title": "ReceivingReport",
-      "description": "Inbound receiving and supplier PO verification report",
+      "description": "Inbound PO receiving report under /users/{userId}/receiving_reports/{reportId}",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "poNumber": { "type": "string", "maxLength": 128 },
-        "supplierName": { "type": "string", "maxLength": 256 },
-        "totalItems": { "type": "number" },
-        "totalReceivedQty": { "type": "number" },
-        "receivedAt": { "type": "string", "maxLength": 64 },
-        "userId": { "type": "string", "maxLength": 128 }
+        "userId": { "type": "string" },
+        "poNumber": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "status": { "type": "string", "enum": ["DRAFT", "LOCKED"] },
+        "totalItems": { "type": "integer" },
+        "totalReceivedQty": { "type": "integer" },
+        "itemsJson": { "type": "string" },
+        "receivedAtIso": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "poNumber", "receivedAt", "userId"]
+      "required": ["userId", "poNumber", "supplierName", "status", "totalItems", "totalReceivedQty", "itemsJson", "receivedAtIso", "createdAt", "updatedAt"]
     },
     "InventoryReport": {
       "title": "InventoryReport",
-      "description": "Periodic stock cycle count and packaging breakdown audit",
+      "description": "Physical cycle count archive under /users/{userId}/inventory_reports/{inventoryId}",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "title": { "type": "string", "maxLength": 256 },
-        "totalItems": { "type": "number" },
-        "countedAt": { "type": "string", "maxLength": 64 },
-        "userId": { "type": "string", "maxLength": 128 }
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "totalItems": { "type": "integer" },
+        "totalCountedPieces": { "type": "integer" },
+        "itemsJson": { "type": "string" },
+        "countedAtIso": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "countedAt", "userId"]
+      "required": ["userId", "title", "totalItems", "totalCountedPieces", "itemsJson", "countedAtIso", "createdAt", "updatedAt"]
     },
     "PickingWave": {
       "title": "PickingWave",
-      "description": "Batch picking wave aggregating multiple order lines",
+      "description": "2-phase picking wave backup under /users/{userId}/picking_waves/{waveId}",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "waveNo": { "type": "string", "maxLength": 128 },
-        "totalInvoices": { "type": "number" },
-        "totalItems": { "type": "number" },
-        "createdAt": { "type": "string", "maxLength": 64 },
-        "userId": { "type": "string", "maxLength": 128 }
+        "userId": { "type": "string" },
+        "waveNo": { "type": "string" },
+        "status": { "type": "string", "enum": ["OPEN", "APPROVED", "COMPLETED"] },
+        "totalInvoices": { "type": "integer" },
+        "totalItems": { "type": "integer" },
+        "waveJson": { "type": "string" },
+        "createdAtIso": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "waveNo", "createdAt", "userId"]
-    },
-    "UserSettings": {
-      "title": "UserSettings",
-      "description": "User specific warehouse settings and digital signature",
-      "type": "object",
-      "properties": {
-        "userId": { "type": "string", "maxLength": 128 },
-        "language": { "type": "string", "maxLength": 16 },
-        "auditorName": { "type": "string", "maxLength": 128 },
-        "auditorId": { "type": "string", "maxLength": 128 },
-        "auditorTitle": { "type": "string", "maxLength": 128 },
-        "updatedAt": { "type": "string", "maxLength": 64 }
-      },
-      "required": ["userId", "auditorName"]
+      "required": ["userId", "waveNo", "status", "totalInvoices", "totalItems", "waveJson", "createdAtIso", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}/settings/{settingId}": {
-      "schema": "UserSettings",
-      "description": "User-specific configuration and auditor identity"
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User-isolated application and auditor settings"
     },
-    "/returns/{returnId}": {
-      "schema": "ReturnReport",
-      "description": "Warehouse RMA return reports"
+    "/users/{userId}/returns/{returnId}": {
+      "schema": { "$ref": "#/entities/ReturnReport" },
+      "description": "User-isolated customer return and lab arbitration reports"
     },
-    "/audit_discrepancies/{discrepancyId}": {
-      "schema": "AuditDiscrepancy",
-      "description": "Recorded audit differences and dispatch errors"
+    "/users/{userId}/audit_discrepancies/{discrepancyId}": {
+      "schema": { "$ref": "#/entities/AuditDiscrepancy" },
+      "description": "User-isolated dispatch audit discrepancies"
     },
-    "/receiving_reports/{reportId}": {
-      "schema": "ReceivingReport",
-      "description": "Inbound receiving supplier shipments"
+    "/users/{userId}/receiving_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ReceivingReport" },
+      "description": "User-isolated inbound receiving logs"
     },
-    "/inventory_reports/{inventoryId}": {
-      "schema": "InventoryReport",
-      "description": "Cycle counts and inventory reconciliations"
+    "/users/{userId}/inventory_reports/{inventoryId}": {
+      "schema": { "$ref": "#/entities/InventoryReport" },
+      "description": "User-isolated physical cycle count reports"
     },
-    "/picking_waves/{waveId}": {
-      "schema": "PickingWave",
-      "description": "Consolidated batch wave picking lists"
+    "/users/{userId}/picking_waves/{waveId}": {
+      "schema": { "$ref": "#/entities/PickingWave" },
+      "description": "User-isolated 2-phase picking waves"
     }
   }
 }

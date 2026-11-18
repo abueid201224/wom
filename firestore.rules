@@ -1,13 +1,12 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Default-deny catch-all safety net
+
+    // Default-deny safety net
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Global Hardened ABAC Helpers
     function isSignedIn() {
       return request.auth != null;
     }
@@ -20,6 +19,10 @@ service cloud.firestore {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -28,53 +31,193 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Health check endpoint
-    match /test/connection {
-      allow read: if true;
+    // 1. User Settings: /users/{userId}/settings/{settingId}
+    function isValidUserSettings(data, userId) {
+      let keys = [
+        'userId', 'language', 'soundEnabled', 'vibrationEnabled',
+        'longBarcodeThreshold', 'auditorName', 'auditorId', 'auditorTitle', 'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.userId == userId
+        && data.language in ['ar', 'en']
+        && data.soundEnabled is bool
+        && data.vibrationEnabled is bool
+        && data.longBarcodeThreshold is int && data.longBarcodeThreshold >= 1 && data.longBarcodeThreshold <= 64
+        && isValidStr(data.auditorName, 1, 128)
+        && isValidStr(data.auditorId, 1, 64)
+        && isValidStr(data.auditorTitle, 0, 128)
+        && data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
-    // User Settings Collection
     match /users/{userId}/settings/{settingId} {
-      allow read: if isOwner(userId);
-      allow create, update: if isOwner(userId) && isValidId(settingId);
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(settingId) && isValidUserSettings(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidUserSettings(incoming(), userId)
+        && incoming().userId == existing().userId;
       allow delete: if isOwner(userId);
     }
 
-    // Return Reports (RMA / Quality Inspection)
-    match /returns/{returnId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(returnId) && incoming().userId == request.auth.uid;
-      allow update: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
-      allow delete: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
+    // 2. Return Reports: /users/{userId}/returns/{returnId}
+    function isValidReturnReport(data, userId) {
+      let keys = [
+        'userId', 'returnReceiptNo', 'originalInvoiceNo', 'orderNo',
+        'customerName', 'paymentMethod', 'status', 'totalRefundAmount',
+        'totalItems', 'auditorName', 'itemsJson', 'notes',
+        'createdAtIso', 'createdAt', 'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.userId == userId
+        && isValidStr(data.returnReceiptNo, 1, 128)
+        && isValidStr(data.originalInvoiceNo, 0, 128)
+        && isValidStr(data.orderNo, 0, 128)
+        && isValidStr(data.customerName, 0, 256)
+        && isValidStr(data.paymentMethod, 0, 64)
+        && data.status in ['COMPLETED_WAREHOUSE', 'PENDING_LAB', 'DRAFT']
+        && (data.totalRefundAmount is int || data.totalRefundAmount is float) && data.totalRefundAmount >= 0
+        && data.totalItems is int && data.totalItems >= 0
+        && isValidStr(data.auditorName, 0, 128)
+        && isValidStr(data.itemsJson, 2, 500000)
+        && isValidStr(data.notes, 0, 1024)
+        && isValidStr(data.createdAtIso, 1, 64)
+        && data.createdAt is timestamp && data.createdAt <= request.time
+        && data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
-    // Audit Discrepancies
-    match /audit_discrepancies/{discrepancyId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(discrepancyId) && incoming().userId == request.auth.uid;
-      allow update: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
-      allow delete: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
+    match /users/{userId}/returns/{returnId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(returnId) && isValidReturnReport(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidReturnReport(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId);
     }
 
-    // Inbound Receiving Reports
-    match /receiving_reports/{reportId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(reportId) && incoming().userId == request.auth.uid;
-      allow update, delete: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
+    // 3. Audit Discrepancies: /users/{userId}/audit_discrepancies/{discrepancyId}
+    function isValidAuditDiscrepancy(data, userId) {
+      let keys = [
+        'userId', 'invoiceNo', 'orderNo', 'itemCode', 'itemName', 'unit',
+        'requiredQty', 'actualQty', 'difference', 'codeStatus', 'qtyStatus',
+        'auditorId', 'auditedAtIso', 'createdAt', 'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.userId == userId
+        && isValidStr(data.invoiceNo, 1, 128)
+        && isValidStr(data.orderNo, 0, 128)
+        && isValidStr(data.itemCode, 1, 128)
+        && isValidStr(data.itemName, 0, 256)
+        && isValidStr(data.unit, 1, 32)
+        && data.requiredQty is int && data.requiredQty >= 0
+        && data.actualQty is int && data.actualQty >= 0
+        && data.difference is int
+        && data.codeStatus in ['MATCH', 'MISMATCH']
+        && data.qtyStatus in ['EXACT', 'SHORTAGE', 'SURPLUS']
+        && isValidStr(data.auditorId, 0, 64)
+        && isValidStr(data.auditedAtIso, 1, 64)
+        && data.createdAt is timestamp && data.createdAt <= request.time
+        && data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
-    // Inventory Count Reports
-    match /inventory_reports/{inventoryId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(inventoryId) && incoming().userId == request.auth.uid;
-      allow update, delete: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
+    match /users/{userId}/audit_discrepancies/{discrepancyId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(discrepancyId) && isValidAuditDiscrepancy(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidAuditDiscrepancy(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId);
     }
 
-    // Picking Waves
-    match /picking_waves/{waveId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(waveId) && incoming().userId == request.auth.uid;
-      allow update, delete: if isSignedIn() && (existing().userId == request.auth.uid || request.auth.token.email == 'ahmed.hamada.gana.2012@gmail.com');
+    // 4. Receiving Reports: /users/{userId}/receiving_reports/{reportId}
+    function isValidReceivingReport(data, userId) {
+      let keys = [
+        'userId', 'poNumber', 'supplierName', 'status',
+        'totalItems', 'totalReceivedQty', 'itemsJson',
+        'receivedAtIso', 'createdAt', 'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.userId == userId
+        && isValidStr(data.poNumber, 1, 128)
+        && isValidStr(data.supplierName, 0, 256)
+        && data.status in ['DRAFT', 'LOCKED']
+        && data.totalItems is int && data.totalItems >= 0
+        && data.totalReceivedQty is int && data.totalReceivedQty >= 0
+        && isValidStr(data.itemsJson, 2, 500000)
+        && isValidStr(data.receivedAtIso, 1, 64)
+        && data.createdAt is timestamp && data.createdAt <= request.time
+        && data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/receiving_reports/{reportId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(reportId) && isValidReceivingReport(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidReceivingReport(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId);
+    }
+
+    // 5. Inventory Reports: /users/{userId}/inventory_reports/{inventoryId}
+    function isValidInventoryReport(data, userId) {
+      let keys = [
+        'userId', 'title', 'totalItems', 'totalCountedPieces',
+        'itemsJson', 'countedAtIso', 'createdAt', 'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.userId == userId
+        && isValidStr(data.title, 1, 256)
+        && data.totalItems is int && data.totalItems >= 0
+        && data.totalCountedPieces is int && data.totalCountedPieces >= 0
+        && isValidStr(data.itemsJson, 2, 500000)
+        && isValidStr(data.countedAtIso, 1, 64)
+        && data.createdAt is timestamp && data.createdAt <= request.time
+        && data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/inventory_reports/{inventoryId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(inventoryId) && isValidInventoryReport(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidInventoryReport(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId);
+    }
+
+    // 6. Picking Waves: /users/{userId}/picking_waves/{waveId}
+    function isValidPickingWave(data, userId) {
+      let keys = [
+        'userId', 'waveNo', 'status', 'totalInvoices',
+        'totalItems', 'waveJson', 'createdAtIso', 'createdAt', 'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.userId == userId
+        && isValidStr(data.waveNo, 1, 128)
+        && data.status in ['OPEN', 'APPROVED', 'COMPLETED']
+        && data.totalInvoices is int && data.totalInvoices >= 0
+        && data.totalItems is int && data.totalItems >= 0
+        && isValidStr(data.waveJson, 2, 500000)
+        && isValidStr(data.createdAtIso, 1, 64)
+        && data.createdAt is timestamp && data.createdAt <= request.time
+        && data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId}/picking_waves/{waveId} {
+      allow get, list: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidId(waveId) && isValidPickingWave(incoming(), userId);
+      allow update: if isOwner(userId)
+        && isValidPickingWave(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(userId);
     }
   }
 }

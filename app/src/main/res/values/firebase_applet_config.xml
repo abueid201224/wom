@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-remixofflineinvo-988d5b24-7fcb-4c4f-af51-c08ca118c4c8</string>
+    <string name="recaptcha_site_key" translatable="false">6LfMpiQuAAAAAAPVb_MC9PnJPa6yQFt0e4ySO-s-</string>
+</resources>
