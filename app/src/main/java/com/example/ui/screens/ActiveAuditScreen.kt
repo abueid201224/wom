@@ -1,20 +1,33 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.model.*
@@ -31,6 +44,8 @@ fun ActiveAuditScreen(
     activeSession: ActiveInvoiceSession?,
     masterItems: List<MasterInvoiceItem>,
     completedInvoices: List<CompletedInvoiceRecord>,
+    auditKpis: AuditScanningKpis,
+    sessionSummary: SessionApprovalSummary,
     scanBanner: ScanFeedbackBanner?,
     pendingLongBarcode: PendingLongBarcodePrompt?,
     onDismissBanner: () -> Unit,
@@ -39,14 +54,15 @@ fun ActiveAuditScreen(
     onProcessScan: (String) -> Unit,
     onAdjustQty: (String, Int) -> Unit,
     onSuspendSession: () -> Unit,
-    onFinalizeSession: (String?) -> Unit,
+    onCloseInvoice: () -> Unit,
+    onOpenSessionApproval: () -> Unit,
+    onExportSessionPdf: () -> Unit,
     onReopenCompleted: (String) -> Unit,
     onChangeSortMode: (ItemSortMode) -> Unit
 ) {
     val s = WmsStrings(isRtl)
     var scanInput by remember { mutableStateOf("") }
     var showCameraModal by remember { mutableStateOf(false) }
-    var showSignatureModal by remember { mutableStateOf(false) }
 
     val availableInvoices by remember(masterItems, completedInvoices) {
         derivedStateOf {
@@ -56,16 +72,26 @@ fun ActiveAuditScreen(
     }
 
     val totalReq by remember(activeSession) {
-        derivedStateOf { activeSession?.items?.values?.sumOf { it.requiredQty } ?: 0 }
+        derivedStateOf { activeSession?.totalRequiredQty ?: 0 }
     }
     val totalScan by remember(activeSession) {
-        derivedStateOf { activeSession?.items?.values?.sumOf { it.actualQty } ?: 0 }
+        derivedStateOf { activeSession?.totalScannedQty ?: 0 }
     }
-    val progress by remember {
+    val progress by remember(activeSession) {
         derivedStateOf {
-            if (totalReq > 0) (totalScan.toFloat() / totalReq.toFloat()).coerceIn(0f, 1f) else 0f
+            (activeSession?.progressPercent ?: 0) / 100f
         }
     }
+    val animatedActiveProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(durationMillis = 280),
+        label = "active_invoice_progress"
+    )
+    val animatedOverallProgress by animateFloatAsState(
+        targetValue = (auditKpis.overallProgressPercent / 100f).coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 320),
+        label = "overall_audit_progress"
+    )
     val sortedEntries by remember(activeSession, settings.itemSortMode) {
         derivedStateOf {
             val sessionItems = activeSession?.items?.entries?.toList().orEmpty()
@@ -91,18 +117,6 @@ fun ActiveAuditScreen(
         )
     }
 
-    if (showSignatureModal && activeSession != null) {
-        AuditorSignatureModal(
-            isRtl = isRtl,
-            auditorName = settings.auditorName,
-            onDismiss = { showSignatureModal = false },
-            onSignatureSaved = { b64 ->
-                showSignatureModal = false
-                onFinalizeSession(b64)
-            }
-        )
-    }
-
     if (pendingLongBarcode != null) {
         LongBarcodePolicyDialog(
             prompt = pendingLongBarcode,
@@ -118,6 +132,14 @@ fun ActiveAuditScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item(key = "top_scanning_kpi_counter") {
+            TopScanningProgressCounterCard(
+                isRtl = isRtl,
+                auditKpis = auditKpis,
+                animatedOverallProgress = animatedOverallProgress
+            )
+        }
+
         item(key = "audit_scanner_header") {
             Surface(
                 shape = MaterialTheme.shapes.large,
@@ -197,6 +219,117 @@ fun ActiveAuditScreen(
         }
 
         if (activeSession == null) {
+            if (sessionSummary.isAllMasterInvoicesFinished) {
+                item(key = "full_session_approval_ready_card") {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("full_session_approval_ready_card"),
+                        shape = MaterialTheme.shapes.large,
+                        color = if (sessionSummary.isSessionApproved) Emerald950 else Slate900,
+                        border = BorderStroke(1.5.dp, if (sessionSummary.isSessionApproved) Emerald400 else Indigo400)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = if (sessionSummary.isSessionApproved) Icons.Rounded.Verified else Icons.AutoMirrored.Rounded.FactCheck,
+                                        contentDescription = null,
+                                        tint = if (sessionSummary.isSessionApproved) Emerald400 else Cyan400
+                                    )
+                                    Column {
+                                        Text(
+                                            text = if (sessionSummary.isSessionApproved)
+                                                s.t("تم اعتماد تقرير الجلسة بالكامل", "Full Session Report Approved")
+                                            else
+                                                s.t("انتهت جميع فواتير الجلسة — التقرير جاهز للاعتماد", "All Invoices Finished — Report Ready for Approval"),
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = Slate100
+                                        )
+                                        Text(
+                                            text = s.t(
+                                                "الممسوح: ${sessionSummary.totalScannedQty}/${sessionSummary.totalRequiredQty} • الأخطاء: ${sessionSummary.totalDiscrepanciesCount} • الدقة: ${sessionSummary.matchAccuracyPercent}%",
+                                                "Scanned: ${sessionSummary.totalScannedQty}/${sessionSummary.totalRequiredQty} • Errors: ${sessionSummary.totalDiscrepanciesCount} • Accuracy: ${sessionSummary.matchAccuracyPercent}%"
+                                            ),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Slate300
+                                        )
+                                    }
+                                }
+                                StatusPill(
+                                    label = "${sessionSummary.auditedInvoicesCount}/${sessionSummary.totalMasterInvoices}",
+                                    color = Emerald400
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = onOpenSessionApproval,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("open_full_approval_report_button"),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
+                                ) {
+                                    Icon(Icons.Rounded.Verified, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        if (sessionSummary.isSessionApproved)
+                                            s.t("عرض التقرير المعتمد", "View Approved Report")
+                                        else
+                                            s.t("اعتماد وعرض التفاصيل", "Review & Approve Report")
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = onExportSessionPdf,
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("audit_export_session_pdf_button")
+                                ) {
+                                    Icon(Icons.Rounded.PictureAsPdf, contentDescription = null, tint = Rose400)
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("PDF", color = Slate100)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (completedInvoices.isNotEmpty()) {
+                item(key = "session_progress_preview_button") {
+                    OutlinedButton(
+                        onClick = onOpenSessionApproval,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("preview_session_report_button"),
+                        border = BorderStroke(1.dp, Indigo400.copy(alpha = 0.5f))
+                    ) {
+                        Icon(Icons.Rounded.Assessment, contentDescription = null, tint = Indigo400)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            s.t(
+                                "معاينة تقرير الجلسة الحالي (${completedInvoices.size} مغلقة • ${sessionSummary.totalDiscrepanciesCount} أخطاء)",
+                                "Preview Current Session Summary (${completedInvoices.size} closed • ${sessionSummary.totalDiscrepanciesCount} errors)"
+                            ),
+                            color = Indigo400
+                        )
+                    }
+                }
+            }
+
             item(key = "audit_ready_header") {
                 SectionHeaderRow(
                     title = s.t("فواتير جاهزة للتدقيق", "Invoices Ready for Audit"),
@@ -207,8 +340,8 @@ fun ActiveAuditScreen(
                 item(key = "audit_empty_state") {
                     EmptyStatePanel(
                         icon = Icons.Rounded.TaskAlt,
-                        title = s.t("تم إكمال جميع الفواتير", "All Invoices Audited"),
-                        description = s.t("استورد ملف إكسيل جديد أو أعد فتح فاتورة من الأسفل.", "Import a new spreadsheet or reopen a completed invoice below.")
+                        title = s.t("تم إغلاق جميع الفواتير", "All Invoices Closed"),
+                        description = s.t("يمكنك اعتماد تقرير الجلسة الكامل من الأعلى أو استيراد ملف جديد.", "Approve the full session report above or import a new spreadsheet.")
                     )
                 }
             } else {
@@ -282,10 +415,14 @@ fun ActiveAuditScreen(
             }
         } else {
             item(key = "active_session_summary") {
+                val isCompleted100 = activeSession.isFullyCompleted
                 Surface(
                     shape = MaterialTheme.shapes.large,
                     color = Slate900,
-                    border = BorderStroke(1.dp, Slate700)
+                    border = BorderStroke(
+                        if (isCompleted100) 2.dp else 1.dp,
+                        if (isCompleted100) Emerald400 else Cyan500.copy(alpha = 0.45f)
+                    )
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),
@@ -297,26 +434,89 @@ fun ActiveAuditScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isCompleted100) Icons.Rounded.Verified else Icons.Rounded.Lock,
+                                        contentDescription = null,
+                                        tint = if (isCompleted100) Emerald400 else Amber400,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        "${s.t("فاتورة نشطة:", "Active Invoice:")} ${activeSession.invoiceNo}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = Emerald400
+                                    )
+                                }
                                 Text(
-                                    "${s.t("فاتورة نشطة:", "Active Invoice:")} ${activeSession.invoiceNo}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = Emerald400
-                                )
-                                Text(
-                                    "${s.t("الطلب:", "Order:")} ${activeSession.orderNo ?: "-"} • ${sortedEntries.size} ${s.t("صنف", "SKUs")}",
+                                    "${s.t("الطلب:", "Order:")} ${activeSession.orderNo ?: "-"} • ${activeSession.exactItemsCount}/${sortedEntries.size} ${s.t("صنف مكتمل", "items matched")}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = Slate400
+                                    color = Slate300
                                 )
                             }
-                            Text("$totalScan / $totalReq", style = MonoMetricStyle, color = Slate100)
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    "${activeSession.progressPercent}%",
+                                    style = MonoMetricStyle,
+                                    color = if (isCompleted100) Emerald400 else Cyan400,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    "$totalScan / $totalReq ${s.t("قطعة", "pcs")}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Slate300
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = if (isCompleted100) Emerald950 else Slate950,
+                            border = BorderStroke(
+                                1.dp,
+                                if (isCompleted100) Emerald500.copy(alpha = 0.6f) else Amber500.copy(alpha = 0.35f)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isCompleted100) Icons.Rounded.CheckCircle else Icons.Rounded.Shield,
+                                    contentDescription = null,
+                                    tint = if (isCompleted100) Emerald400 else Amber400,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = if (isCompleted100) {
+                                        s.t(
+                                            "تم مسح 100% من الفاتورة — جميع العناصر مطابقة وجاهزة للإغلاق (الاعتماد لكامل التقرير)",
+                                            "100% Invoice Scan Complete — Ready to close (full report approved at session end)"
+                                        )
+                                    } else {
+                                        s.t(
+                                            "الفاتورة مقفلة على عناصرها فقط • المتبقي: ${activeSession.remainingQty} قطعة (يُرفض أي باركود خارجي)",
+                                            "Locked to invoice items only • Remaining: ${activeSession.remainingQty} pcs (outside barcodes rejected)"
+                                        )
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isCompleted100) Emerald400 else Amber400
+                                )
+                            }
                         }
 
                         LinearProgressIndicator(
-                            progress = { progress },
+                            progress = { animatedActiveProgress },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(8.dp),
-                            color = Emerald500,
+                                .height(10.dp)
+                                .clip(RoundedCornerShape(6.dp)),
+                            color = if (isCompleted100) Emerald400 else Cyan400,
                             trackColor = Slate800
                         )
 
@@ -349,16 +549,16 @@ fun ActiveAuditScreen(
                                 Text(s.t("تعليق الفاتورة", "Hold"), color = Amber400)
                             }
                             Button(
-                                onClick = { showSignatureModal = true },
+                                onClick = onCloseInvoice,
                                 modifier = Modifier
                                     .weight(1f)
                                     .defaultMinSize(minHeight = 48.dp)
                                     .testTag("audit_complete_button"),
                                 colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
                             ) {
-                                Icon(Icons.Rounded.Verified, contentDescription = null)
+                                Icon(Icons.Rounded.TaskAlt, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
-                                Text(s.t("اعتماد وإقفال", "Sign & Close"))
+                                Text(s.t("إغلاق الفاتورة", "Close Invoice"))
                             }
                         }
                     }
@@ -427,6 +627,195 @@ fun ActiveAuditScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun TopScanningProgressCounterCard(
+    isRtl: Boolean,
+    auditKpis: AuditScanningKpis,
+    animatedOverallProgress: Float
+) {
+    val s = WmsStrings(isRtl)
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("top_scanning_counter_card"),
+        shape = MaterialTheme.shapes.large,
+        color = Slate900,
+        border = BorderStroke(1.dp, Indigo500.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = s.t("عداد المسح والتقدم الشامل", "Global Scanning Progress Counter"),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Slate100
+                    )
+                    Text(
+                        text = s.t(
+                            "مكتمل: ${auditKpis.completedInvoices} من ${auditKpis.totalInvoices} فاتورة • المتبقي: ${auditKpis.remainingInvoices}",
+                            "Completed: ${auditKpis.completedInvoices}/${auditKpis.totalInvoices} invoices • Remaining: ${auditKpis.remainingInvoices}"
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Slate400
+                    )
+                }
+
+                // Circular graphical progress gauge + exact %
+                Box(
+                    modifier = Modifier
+                        .size(58.dp)
+                        .testTag("top_scanning_progress_gauge"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val strokePx = 6.dp.toPx()
+                        val inset = strokePx / 2f
+                        val arcSize = Size(size.width - strokePx, size.height - strokePx)
+                        drawArc(
+                            color = Slate800,
+                            startAngle = -90f,
+                            sweepAngle = 360f,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                        )
+                        drawArc(
+                            brush = Brush.sweepGradient(listOf(Cyan400, Emerald400, Indigo400)),
+                            startAngle = -90f,
+                            sweepAngle = 360f * animatedOverallProgress,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                        )
+                    }
+                    Text(
+                        text = "${auditKpis.overallProgressPercent}%",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = if (auditKpis.overallProgressPercent >= 100) Emerald400 else Cyan400
+                    )
+                }
+            }
+
+            // 3 KPI counters: Total Invoices | Total Scanned | Remaining
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CounterMiniTile(
+                    label = s.t("إجمالي الفواتير", "Total Invoices"),
+                    value = auditKpis.totalInvoices.toString(),
+                    accent = Indigo400,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("counter_total_invoices")
+                )
+                CounterMiniTile(
+                    label = s.t("إجمالي ما تم مسحه", "Total Scanned"),
+                    value = auditKpis.totalScannedQty.toString(),
+                    accent = Emerald400,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("counter_total_scanned")
+                )
+                CounterMiniTile(
+                    label = s.t("الباقي", "Remaining"),
+                    value = auditKpis.remainingQty.toString(),
+                    accent = if (auditKpis.remainingQty == 0 && auditKpis.totalRequiredQty > 0) Emerald400 else Amber400,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("counter_remaining")
+                )
+            }
+
+            // Graphical horizontal bar + percentage legend
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = s.t(
+                            "المؤشر البياني (${auditKpis.totalEffectiveScannedQty} / ${auditKpis.totalRequiredQty} قطعة)",
+                            "Progress Bar (${auditKpis.totalEffectiveScannedQty} / ${auditKpis.totalRequiredQty} pcs)"
+                        ),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Slate300
+                    )
+                    Text(
+                        text = "${auditKpis.overallProgressPercent}%",
+                        style = MonoCodeStyle,
+                        color = if (auditKpis.overallProgressPercent >= 100) Emerald400 else Cyan400
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Slate800)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(animatedOverallProgress)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Cyan500, Emerald400)
+                                )
+                            )
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CounterMiniTile(
+    label: String,
+    value: String,
+    accent: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.medium,
+        color = Slate950,
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.3f))
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = value,
+                style = MonoMetricStyle,
+                color = accent,
+                maxLines = 1
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = Slate300,
+                maxLines = 1
+            )
         }
     }
 }

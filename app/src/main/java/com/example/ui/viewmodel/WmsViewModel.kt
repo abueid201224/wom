@@ -49,8 +49,9 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
     val syncMetadata: StateFlow<SyncMetadata> = repository.syncMetadataFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, SyncMetadata())
 
-    val activeSession: StateFlow<ActiveInvoiceSession?> = repository.activeSessionFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    private val _activeSession = MutableStateFlow<ActiveInvoiceSession?>(null)
+    val activeSession: StateFlow<ActiveInvoiceSession?> = _activeSession.asStateFlow()
+    @Volatile private var activeSessionMutatedLocally = false
 
     val masterItems: StateFlow<List<MasterInvoiceItem>> = repository.masterItemsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
@@ -137,7 +138,180 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
     private val _pdfExtractionState = MutableStateFlow<PdfExtractionUiState>(PdfExtractionUiState.Idle)
     val pdfExtractionState: StateFlow<PdfExtractionUiState> = _pdfExtractionState.asStateFlow()
 
+    private val _showSessionApprovalModal = MutableStateFlow(false)
+    val showSessionApprovalModal: StateFlow<Boolean> = _showSessionApprovalModal.asStateFlow()
+
+    val auditScanningKpis: StateFlow<AuditScanningKpis> = combine(
+        masterItems,
+        completedInvoices,
+        incompleteInvoices,
+        activeSession
+    ) { master, completed, incomplete, session ->
+        val allInvoiceNos = (master.map { it.invoiceNo } + completed.map { it.invoiceNo }).distinct()
+        val completedMap = completed.associateBy { it.invoiceNo }
+        val incompleteMap = incomplete.associateBy { it.invoiceNo }
+
+        var reqSum = 0
+        var scannedSum = 0
+        var effectiveSum = 0
+
+        for (inv in allInvoiceNos) {
+            val masterReq = master.filter { it.invoiceNo == inv }.sumOf { it.requiredQty.coerceAtLeast(0) }
+            val compRec = completedMap[inv]
+            val incRec = incompleteMap[inv]
+            when {
+                compRec != null -> {
+                    val invReq = if (masterReq > 0) masterReq else compRec.totalQty
+                    reqSum += invReq
+                    scannedSum += compRec.totalQty
+                    effectiveSum += invReq
+                }
+                session != null && session.invoiceNo.equals(inv, ignoreCase = true) -> {
+                    reqSum += session.totalRequiredQty
+                    scannedSum += session.totalScannedQty
+                    effectiveSum += session.effectiveScannedQty
+                }
+                incRec != null -> {
+                    reqSum += incRec.totalRequiredQty
+                    scannedSum += incRec.scannedQty
+                    effectiveSum += incRec.session.effectiveScannedQty
+                }
+                else -> {
+                    reqSum += masterReq
+                }
+            }
+        }
+
+        val remQty = (reqSum - effectiveSum).coerceAtLeast(0)
+        val overallPct = if (reqSum > 0) {
+            ((effectiveSum.toDouble() / reqSum) * 100.0).roundToInt().coerceIn(0, 100)
+        } else 0
+
+        AuditScanningKpis(
+            totalInvoices = allInvoiceNos.size,
+            completedInvoices = completed.size,
+            remainingInvoices = (allInvoiceNos.size - completed.size).coerceAtLeast(0),
+            totalRequiredQty = reqSum,
+            totalScannedQty = scannedSum,
+            totalEffectiveScannedQty = effectiveSum,
+            remainingQty = remQty,
+            overallProgressPercent = overallPct,
+            activeInvoiceProgressPercent = session?.progressPercent ?: 0,
+            activeInvoiceScannedQty = session?.totalScannedQty ?: 0,
+            activeInvoiceRequiredQty = session?.totalRequiredQty ?: 0,
+            activeInvoiceRemainingQty = session?.remainingQty ?: 0
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, AuditScanningKpis())
+
+    @Suppress("UNCHECKED_CAST")
+    val sessionApprovalSummary: StateFlow<SessionApprovalSummary> = combine(
+        masterItems,
+        completedInvoices,
+        auditHistory,
+        discrepancies,
+        dailySnapshots,
+        activeSession
+    ) { values ->
+        val master = values[0] as List<MasterInvoiceItem>
+        val completed = values[1] as List<CompletedInvoiceRecord>
+        val history = values[2] as List<InvoiceAuditHistory>
+        val disc = values[3] as List<AuditDiscrepancy>
+        val snapshots = values[4] as List<DailyAuditSnapshot>
+        val session = values[5] as ActiveInvoiceSession?
+
+        val allMasterInvoices = master.map { it.invoiceNo }.distinct()
+        val historyByInvoice = history.groupBy { it.invoiceNo }.mapValues { it.value.first() }
+        val discByInvoice = disc.groupBy { it.invoiceNo }
+
+        val invoiceDetails = completed.map { comp ->
+            val hist = historyByInvoice[comp.invoiceNo]
+            val invDiscs = discByInvoice[comp.invoiceNo].orEmpty()
+            val masterInvRows = master.filter { it.invoiceNo == comp.invoiceNo }
+            val reqItemsCount = hist?.totalRequiredItems
+                ?: masterInvRows.size.takeIf { it > 0 }
+                ?: comp.totalItems
+            val reqQty = hist?.totalRequiredQty
+                ?: masterInvRows.sumOf { it.requiredQty.coerceAtLeast(0) }.takeIf { it > 0 }
+                ?: comp.totalQty
+            val scannedQty = hist?.totalScannedQty ?: comp.totalQty
+            val scannedItemsCount = hist?.scannedItemsCount ?: comp.totalItems
+            val exactItemsCount = hist?.exactItemsCount ?: (reqItemsCount - invDiscs.size).coerceAtLeast(0)
+            val shortageQty = invDiscs.filter { it.difference < 0 }.sumOf { kotlin.math.abs(it.difference) }
+            val surplusQty = invDiscs.filter { it.difference > 0 }.sumOf { it.difference }
+            val status = if (invDiscs.isEmpty()) "EXACT" else "DISCREPANCY"
+
+            SessionInvoiceDetailRow(
+                invoiceNo = comp.invoiceNo,
+                orderNo = comp.orderNo ?: hist?.orderNo,
+                requiredItemsCount = reqItemsCount,
+                scannedItemsCount = scannedItemsCount,
+                exactItemsCount = exactItemsCount,
+                requiredQty = reqQty,
+                scannedQty = scannedQty,
+                discrepancyCount = invDiscs.size,
+                shortageQty = shortageQty,
+                surplusQty = surplusQty,
+                status = status,
+                completedAt = comp.completedAt
+            )
+        }
+
+        val completedSet = completed.map { it.invoiceNo.lowercase() }.toSet()
+        val remainingCount = allMasterInvoices.count { it.lowercase() !in completedSet }
+        val exactInvCount = invoiceDetails.count { it.discrepancyCount == 0 }
+        val discInvCount = invoiceDetails.count { it.discrepancyCount > 0 }
+        val totalReqQty = invoiceDetails.sumOf { it.requiredQty }.takeIf { it > 0 }
+            ?: master.sumOf { it.requiredQty.coerceAtLeast(0) }
+        val totalScannedQty = invoiceDetails.sumOf { it.scannedQty }
+        val shortageItemsCount = disc.count { it.qtyStatus == QtyStatus.SHORTAGE || it.difference < 0 }
+        val surplusItemsCount = disc.count { it.qtyStatus == QtyStatus.SURPLUS || it.difference > 0 }
+        val totalShortageQty = disc.filter { it.difference < 0 }.sumOf { kotlin.math.abs(it.difference) }
+        val totalSurplusQty = disc.filter { it.difference > 0 }.sumOf { it.difference }
+        val totalVarianceQty = totalShortageQty + totalSurplusQty
+        val accuracyPct = if (totalReqQty > 0 && invoiceDetails.isNotEmpty()) {
+            (((totalReqQty - totalVarianceQty).coerceAtLeast(0).toDouble() / totalReqQty) * 100.0)
+                .roundToInt()
+                .coerceIn(0, 100)
+        } else 0
+
+        val isAllDone = allMasterInvoices.isNotEmpty() && remainingCount == 0 && session == null
+        val latestSnapshot = snapshots.firstOrNull()
+        val latestCompletedAt = completed.maxOfOrNull { it.completedAt } ?: ""
+        val isApproved = isAllDone &&
+            latestSnapshot != null &&
+            latestSnapshot.completedInvoices == completed.size &&
+            latestSnapshot.closedAt >= latestCompletedAt
+
+        SessionApprovalSummary(
+            totalMasterInvoices = allMasterInvoices.size,
+            auditedInvoicesCount = invoiceDetails.size,
+            remainingInvoicesCount = remainingCount,
+            exactInvoicesCount = exactInvCount,
+            discrepancyInvoicesCount = discInvCount,
+            totalItemsCount = invoiceDetails.sumOf { it.requiredItemsCount }.takeIf { it > 0 } ?: master.size,
+            totalRequiredQty = totalReqQty,
+            totalScannedQty = totalScannedQty,
+            matchAccuracyPercent = accuracyPct,
+            totalDiscrepanciesCount = disc.size,
+            shortageItemsCount = shortageItemsCount,
+            surplusItemsCount = surplusItemsCount,
+            totalShortageQty = totalShortageQty,
+            totalSurplusQty = totalSurplusQty,
+            isAllMasterInvoicesFinished = isAllDone,
+            isSessionApproved = isApproved,
+            latestApprovedSnapshot = latestSnapshot,
+            invoiceDetails = invoiceDetails,
+            discrepancyDetails = disc
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, SessionApprovalSummary())
+
     init {
+        viewModelScope.launch {
+            val persisted = repository.activeSessionFlow.first()
+            if (!activeSessionMutatedLocally) {
+                _activeSession.value = persisted
+            }
+        }
         viewModelScope.launch {
             GoogleAuthManager.attemptAutoSignIn(app)
         }
@@ -215,87 +389,117 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openSessionApprovalModal() {
+        _showSessionApprovalModal.value = true
+    }
+
+    fun dismissSessionApprovalModal() {
+        _showSessionApprovalModal.value = false
+    }
+
     // --- Audit Session Lifecycle ---
     fun startOrOpenInvoice(invoiceNoRaw: String, skipCompletedCheck: Boolean = false): Boolean {
         val invoiceNo = ScannerParser.cleanString(invoiceNoRaw)
         if (invoiceNo.isBlank()) return false
+
+        val currentOpenSession = activeSession.value
+        if (currentOpenSession != null && currentOpenSession.invoiceNo.equals(invoiceNo, ignoreCase = true)) {
+            return true
+        }
 
         val alreadyCompleted = !skipCompletedCheck &&
             completedInvoices.value.any { it.invoiceNo.equals(invoiceNo, ignoreCase = true) }
         if (alreadyCompleted) {
             playTone(WmsAudioTone.BLOCKED_COMPLETED)
             _scanBanner.value = ScanFeedbackBanner.Warning(
-                "الفاتورة $invoiceNo مقفلة ومكتملة مسبقاً. افتحها من المشرف للمتابعة.",
-                "Invoice $invoiceNo is already completed & locked. Supervisor reopen required."
+                "الفاتورة $invoiceNo مقفلة ومغلق تدقيقها مسبقاً. افتحها من المشرف للمتابعة.",
+                "Invoice $invoiceNo is already closed & locked. Supervisor reopen required."
             )
             return false
         }
 
         val incomplete = incompleteInvoices.value.find { it.invoiceNo.equals(invoiceNo, ignoreCase = true) }
-        if (incomplete != null) {
-            viewModelScope.launch {
-                repository.saveActiveSession(incomplete.session)
-                scanDebouncer.reset()
-                _scanBanner.value = ScanFeedbackBanner.Success(
-                    "تم استئناف الفاتورة المعلقة $invoiceNo",
-                    "Resumed incomplete invoice $invoiceNo"
+        val targetSession: ActiveInvoiceSession = if (incomplete != null) {
+            incomplete.session.copy(auditorSignature = null)
+        } else {
+            val invoiceRows = masterItems.value.filter { it.invoiceNo.equals(invoiceNo, ignoreCase = true) }
+            if (invoiceRows.isEmpty()) {
+                playTone(WmsAudioTone.MISMATCH_ALERT)
+                _scanBanner.value = ScanFeedbackBanner.Error(
+                    "رقم الفاتورة $invoiceNo غير موجود في القاعدة الرئيسية.",
+                    "Invoice $invoiceNo not found in master database."
                 )
+                return false
             }
-            return true
-        }
 
-        val invoiceRows = masterItems.value.filter { it.invoiceNo.equals(invoiceNo, ignoreCase = true) }
-        if (invoiceRows.isEmpty()) {
-            playTone(WmsAudioTone.MISMATCH_ALERT)
-            _scanBanner.value = ScanFeedbackBanner.Error(
-                "رقم الفاتورة $invoiceNo غير موجود في القاعدة الرئيسية.",
-                "Invoice $invoiceNo not found in master database."
+            val itemsMap = linkedMapOf<String, ScannedAuditItem>()
+            val now = Instant.now().toString()
+            for (row in invoiceRows) {
+                val key = PackagingEngine.normalizeCode(row.itemCode)
+                val existing = itemsMap[key]
+                if (existing != null) {
+                    itemsMap[key] = existing.copy(requiredQty = existing.requiredQty + row.requiredQty.coerceAtLeast(0))
+                } else {
+                    itemsMap[key] = ScannedAuditItem(
+                        orderNo = row.orderNo,
+                        itemCode = row.itemCode,
+                        itemName = row.itemName,
+                        unit = row.unit,
+                        requiredQty = row.requiredQty.coerceAtLeast(0),
+                        actualQty = 0,
+                        codeStatus = CodeStatus.MATCH,
+                        qtyStatus = QtyStatus.SHORTAGE,
+                        lastScannedAt = now,
+                        originalIndex = row.originalIndex
+                    )
+                }
+            }
+
+            val user = currentUser.value
+            ActiveInvoiceSession(
+                orderNo = invoiceRows.firstOrNull()?.orderNo,
+                invoiceNo = invoiceRows.first().invoiceNo,
+                auditorName = user.name,
+                auditorId = user.jobId,
+                auditorSignature = null,
+                startedAt = now,
+                lastActivityAt = now,
+                items = itemsMap
             )
-            return false
         }
 
-        val itemsMap = linkedMapOf<String, ScannedAuditItem>()
-        val now = Instant.now().toString()
-        for (row in invoiceRows) {
-            val key = PackagingEngine.normalizeCode(row.itemCode)
-            val existing = itemsMap[key]
-            if (existing != null) {
-                itemsMap[key] = existing.copy(requiredQty = existing.requiredQty + row.requiredQty.coerceAtLeast(0))
-            } else {
-                itemsMap[key] = ScannedAuditItem(
-                    orderNo = row.orderNo,
-                    itemCode = row.itemCode,
-                    itemName = row.itemName,
-                    unit = row.unit,
-                    requiredQty = row.requiredQty.coerceAtLeast(0),
-                    actualQty = 0,
-                    codeStatus = CodeStatus.MATCH,
-                    qtyStatus = QtyStatus.SHORTAGE,
-                    lastScannedAt = now,
-                    originalIndex = row.originalIndex
-                )
-            }
+        // Automatically close the previously active invoice (without signature) before switching to the new one
+        val prevArtifacts = currentOpenSession?.let { buildClosedInvoiceArtifacts(it) }
+
+        activeSessionMutatedLocally = true
+        _activeSession.value = targetSession
+        scanDebouncer.reset()
+        playTone(WmsAudioTone.INVOICE_REOPENED)
+        _scanBanner.value = when {
+            currentOpenSession != null -> ScanFeedbackBanner.Success(
+                "تم إغلاق الفاتورة ${currentOpenSession.invoiceNo} وفتح الفاتورة ${targetSession.invoiceNo} (${targetSession.items.size} أصناف)",
+                "Closed ${currentOpenSession.invoiceNo} & opened ${targetSession.invoiceNo} (${targetSession.items.size} items)"
+            )
+            incomplete != null -> ScanFeedbackBanner.Success(
+                "تم استئناف الفاتورة المعلقة ${targetSession.invoiceNo}",
+                "Resumed incomplete invoice ${targetSession.invoiceNo}"
+            )
+            else -> ScanFeedbackBanner.Success(
+                "تم فتح الفاتورة ${targetSession.invoiceNo} وقفلها على عناصرها (${targetSession.items.size} أصناف) — يُمنع أي باركود خارجي",
+                "Opened invoice ${targetSession.invoiceNo} (Locked to ${targetSession.items.size} items only)"
+            )
         }
 
-        val user = currentUser.value
-        val newSession = ActiveInvoiceSession(
-            orderNo = invoiceRows.firstOrNull()?.orderNo,
-            invoiceNo = invoiceRows.first().invoiceNo,
-            auditorName = user.name,
-            auditorId = user.jobId,
-            auditorSignature = settings.value.auditorSignatureBase64,
-            startedAt = now,
-            lastActivityAt = now,
-            items = itemsMap
-        )
         viewModelScope.launch {
-            repository.saveActiveSession(newSession)
-            scanDebouncer.reset()
-            playTone(WmsAudioTone.INVOICE_REOPENED)
-            _scanBanner.value = ScanFeedbackBanner.Success(
-                "تم فتح الفاتورة ${newSession.invoiceNo} (${itemsMap.size} أصناف)",
-                "Opened invoice ${newSession.invoiceNo} (${itemsMap.size} items)"
-            )
+            if (prevArtifacts != null) {
+                repository.finalizeAuditSession(
+                    discrepancies = prevArtifacts.first,
+                    completed = prevArtifacts.second,
+                    history = prevArtifacts.third,
+                    clearActiveSession = false
+                )
+            }
+            repository.saveActiveSession(targetSession)
         }
         return true
     }
@@ -362,11 +566,13 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         val updated = cur.copy(
             longBarcodePolicy = if (allowForSession) LongBarcodePolicy.ALLOW else LongBarcodePolicy.BLOCK
         )
+        activeSessionMutatedLocally = true
+        _activeSession.value = updated
         viewModelScope.launch {
             repository.saveActiveSession(updated)
-            if (allowForSession) {
-                applyItemScanToSession(updated, prompt.code, 1)
-            }
+        }
+        if (allowForSession) {
+            applyItemScanToSession(updated, prompt.code, 1)
         }
     }
 
@@ -397,95 +603,59 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
                 items = newMap
             )
 
-            viewModelScope.launch {
-                repository.saveActiveSession(updatedSession)
+            activeSessionMutatedLocally = true
+            _activeSession.value = updatedSession
+            if (updatedSession.isFullyCompleted) {
+                playTone(WmsAudioTone.EXACT_COMPLETE)
+                _scanBanner.value = ScanFeedbackBanner.Success(
+                    "🎉 اكتمل مسح الفاتورة ${updatedSession.invoiceNo} بنسبة 100%! جميع الأصناف (${updatedSession.exactItemsCount}/${updatedSession.totalItemsCount}) مطابقة وجاهزة للاعتماد.",
+                    "🎉 Invoice ${updatedSession.invoiceNo} 100% Complete! All ${updatedSession.totalItemsCount} items matched."
+                )
+            } else {
                 when (newQtyStatus) {
                     QtyStatus.EXACT -> {
                         playTone(WmsAudioTone.EXACT_COMPLETE)
                         _scanBanner.value = ScanFeedbackBanner.Success(
-                            "مطابقة تامة: ${updatedItem.itemName} ($newQty/${item.requiredQty})",
-                            "Exact Match: ${updatedItem.itemName} ($newQty/${item.requiredQty})"
+                            "مطابقة الصنف: ${updatedItem.itemName} ($newQty/${item.requiredQty}) • تقدم الفاتورة ${updatedSession.progressPercent}%",
+                            "Item Exact Match: ${updatedItem.itemName} ($newQty/${item.requiredQty}) • Invoice ${updatedSession.progressPercent}%"
                         )
                     }
                     QtyStatus.SURPLUS -> {
                         playTone(WmsAudioTone.SURPLUS_WARNING)
                         _scanBanner.value = ScanFeedbackBanner.Warning(
-                            "تنبيه زيادة: ${updatedItem.itemName} ($newQty/${item.requiredQty})",
-                            "Surplus Alert: ${updatedItem.itemName} ($newQty/${item.requiredQty})"
+                            "تنبيه زيادة: ${updatedItem.itemName} ($newQty/${item.requiredQty}) • تقدم الفاتورة ${updatedSession.progressPercent}%",
+                            "Surplus Alert: ${updatedItem.itemName} ($newQty/${item.requiredQty}) • Invoice ${updatedSession.progressPercent}%"
                         )
                     }
                     QtyStatus.SHORTAGE -> {
                         playTone(WmsAudioTone.MATCH)
                         _scanBanner.value = ScanFeedbackBanner.Success(
-                            "تم المسح: ${updatedItem.itemName} ($newQty/${item.requiredQty})",
-                            "Scanned: ${updatedItem.itemName} ($newQty/${item.requiredQty})"
+                            "تم المسح: ${updatedItem.itemName} ($newQty/${item.requiredQty}) • التقدم ${updatedSession.progressPercent}%",
+                            "Scanned: ${updatedItem.itemName} ($newQty/${item.requiredQty}) • Progress ${updatedSession.progressPercent}%"
                         )
                     }
                 }
             }
+            viewModelScope.launch {
+                repository.saveActiveSession(updatedSession)
+            }
         } else {
+            // Strict invoice lock: reject any barcode outside the active invoice completely without recording it
             val belonging = masterItems.value.firstOrNull {
                 PackagingEngine.normalizeCode(it.itemCode) == normKey &&
                     !it.invoiceNo.equals(session.invoiceNo, ignoreCase = true)
             }
-            val wrongPick = WrongPickingRecord(
-                orderNo = session.orderNo,
-                activeInvoiceNo = session.invoiceNo,
-                itemCode = rawCode,
-                itemName = belonging?.itemName,
-                unit = belonging?.unit,
-                actualBelongingInvoiceNo = belonging?.invoiceNo,
-                actualBelongingOrderNo = belonging?.orderNo,
-                scannedAt = now,
-                auditorName = currentUser.value.name,
-                auditorId = currentUser.value.jobId,
-                quantity = deltaQty.coerceAtLeast(1)
+            playTone(WmsAudioTone.MISMATCH_ALERT)
+            _scanBanner.value = ScanFeedbackBanner.Error(
+                if (belonging != null)
+                    "🚫 باركود مرفوض! ($rawCode) خارج الفاتورة ${session.invoiceNo} ويتبع الفاتورة ${belonging.invoiceNo} — لم يتم تسجيله"
+                else
+                    "🚫 باركود مرفوض خارج الفاتورة! الفاتورة ${session.invoiceNo} مقفلة على عناصرها فقط — لم يتم تسجيل ($rawCode)",
+                if (belonging != null)
+                    "🚫 Rejected! ($rawCode) is outside invoice ${session.invoiceNo} (belongs to ${belonging.invoiceNo}) — Not recorded"
+                else
+                    "🚫 Rejected outside barcode! Invoice ${session.invoiceNo} is locked to its items only — ($rawCode) not recorded"
             )
-
-            val prevMismatch = session.items[normKey]
-            val mismatchItem = if (prevMismatch != null) {
-                prevMismatch.copy(
-                    actualQty = prevMismatch.actualQty + deltaQty.coerceAtLeast(1),
-                    lastScannedAt = now,
-                    scanHistory = (prevMismatch.scanHistory + now).takeLast(20)
-                )
-            } else {
-                ScannedAuditItem(
-                    orderNo = session.orderNo,
-                    itemCode = rawCode,
-                    itemName = belonging?.itemName ?: "صنف غير مدرج بالفاتورة",
-                    unit = belonging?.unit ?: "PCS",
-                    requiredQty = 0,
-                    actualQty = deltaQty.coerceAtLeast(1),
-                    codeStatus = CodeStatus.MISMATCH,
-                    qtyStatus = QtyStatus.SURPLUS,
-                    lastScannedAt = now,
-                    scanHistory = listOf(now),
-                    originalIndex = session.items.size + 100
-                )
-            }
-            val newMap = session.items.toMutableMap().apply { put(normKey, mismatchItem) }
-            val updatedSession = session.copy(
-                lastActivityAt = now,
-                lastScannedItemCode = normKey,
-                items = newMap
-            )
-
-            viewModelScope.launch {
-                repository.insertWrongPick(wrongPick)
-                repository.saveActiveSession(updatedSession)
-                playTone(WmsAudioTone.MISMATCH_ALERT)
-                _scanBanner.value = ScanFeedbackBanner.Error(
-                    if (belonging != null)
-                        "خطأ تجميع! الصنف $rawCode يتبع الفاتورة ${belonging.invoiceNo}"
-                    else
-                        "باركود غير مطابق! ($rawCode) غير موجود بالفاتورة",
-                    if (belonging != null)
-                        "Wrong Pick! Item $rawCode belongs to invoice ${belonging.invoiceNo}"
-                    else
-                        "Barcode Mismatch! ($rawCode) not on this invoice"
-                )
-            }
         }
     }
 
@@ -504,8 +674,18 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         val updatedMap = session.items.toMutableMap().apply {
             put(key, item.copy(actualQty = newQty, qtyStatus = newQtyStatus, lastScannedAt = now))
         }
+        val updatedSession = session.copy(items = updatedMap, lastActivityAt = now)
+        activeSessionMutatedLocally = true
+        _activeSession.value = updatedSession
+        if (updatedSession.isFullyCompleted) {
+            playTone(WmsAudioTone.EXACT_COMPLETE)
+            _scanBanner.value = ScanFeedbackBanner.Success(
+                "🎉 اكتمل مسح الفاتورة ${updatedSession.invoiceNo} بنسبة 100%! جميع الأصناف (${updatedSession.exactItemsCount}/${updatedSession.totalItemsCount}) مطابقة وجاهزة للاعتماد.",
+                "🎉 Invoice ${updatedSession.invoiceNo} 100% Complete! All ${updatedSession.totalItemsCount} items matched."
+            )
+        }
         viewModelScope.launch {
-            repository.saveActiveSession(session.copy(items = updatedMap, lastActivityAt = now))
+            repository.saveActiveSession(updatedSession)
         }
     }
 
@@ -530,6 +710,8 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             scannedQty = scannedQty,
             totalRequiredQty = totalReq
         )
+        activeSessionMutatedLocally = true
+        _activeSession.value = null
         viewModelScope.launch {
             repository.suspendSession(record)
             playTone(WmsAudioTone.INVOICE_LOCKED)
@@ -537,8 +719,9 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun finalizeActiveAuditSession(signatureBase64: String? = null) {
-        val session = activeSession.value ?: return
+    private fun buildClosedInvoiceArtifacts(
+        session: ActiveInvoiceSession
+    ): Triple<List<AuditDiscrepancy>, CompletedInvoiceRecord, InvoiceAuditHistory> {
         val now = Instant.now().toString()
         val items = session.items.values.toList()
         val user = currentUser.value
@@ -572,7 +755,7 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             orderNo = session.orderNo,
             auditorName = user.name,
             auditorId = user.jobId,
-            auditorSignature = signatureBase64 ?: settings.value.auditorSignatureBase64,
+            auditorSignature = null,
             completedAt = now,
             totalItems = items.size,
             totalQty = totalScanQty
@@ -593,10 +776,38 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             completedAt = now
         )
 
+        return Triple(discList, completed, history)
+    }
+
+    fun closeActiveInvoice() {
+        val session = activeSession.value ?: return
+        val (discList, completed, history) = buildClosedInvoiceArtifacts(session)
+
+        val allMasterInvoices = masterItems.value.map { it.invoiceNo }.distinct()
+        val nextClosedSet = (completedInvoices.value.map { it.invoiceNo } + session.invoiceNo).toSet()
+        val allDatabaseInvoicesFinished = allMasterInvoices.isNotEmpty() &&
+            allMasterInvoices.all { inv -> nextClosedSet.any { it.equals(inv, ignoreCase = true) } }
+
+        activeSessionMutatedLocally = true
+        _activeSession.value = null
+        if (allDatabaseInvoicesFinished) {
+            _showSessionApprovalModal.value = true
+        }
+
         viewModelScope.launch {
-            repository.finalizeAuditSession(discList, completed, history)
-            playTone(WmsAudioTone.INVOICE_FINISHED)
-            _statusMessage.value = "تم اعتماد وإقفال الفاتورة ${session.invoiceNo} بنجاح"
+            repository.finalizeAuditSession(
+                discrepancies = discList,
+                completed = completed,
+                history = history,
+                clearActiveSession = true
+            )
+            if (allDatabaseInvoicesFinished) {
+                playTone(WmsAudioTone.EXACT_COMPLETE)
+                _statusMessage.value = "تم إغلاق الفاتورة ${session.invoiceNo} وإنهاء جميع فواتير الجلسة — التقرير جاهز للاعتماد الشامل"
+            } else {
+                playTone(WmsAudioTone.INVOICE_FINISHED)
+                _statusMessage.value = "تم إغلاق الفاتورة ${session.invoiceNo} (الاعتماد يتم لكامل التقرير بعد إنهاء جميع الفواتير)"
+            }
         }
     }
 
@@ -612,31 +823,52 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun closeDailyShift() {
-        viewModelScope.launch {
-            val today = LocalDate.now().toString()
-            val master = masterItems.value
-            val completed = completedInvoices.value
-            val disc = discrepancies.value
-            val wrong = wrongPicks.value
+    fun approveFullSessionReport(signatureBase64: String? = null, notes: String? = null): DailyAuditSnapshot {
+        val today = LocalDate.now().toString()
+        val summary = sessionApprovalSummary.value
+        val master = masterItems.value
+        val completed = completedInvoices.value
+        val disc = discrepancies.value
+        val wrong = wrongPicks.value
+        val user = currentUser.value
+        val s = settings.value
+        val effectiveSig = signatureBase64?.takeIf { it.isNotBlank() } ?: s.auditorSignatureBase64
 
-            val snapshot = DailyAuditSnapshot(
-                id = "day-$today-${System.currentTimeMillis() % 1000}",
-                date = today,
-                closedAt = Instant.now().toString(),
-                totalInvoices = master.map { it.invoiceNo }.distinct().size,
-                completedInvoices = completed.size,
-                totalItems = master.size,
-                totalRequiredQty = master.sumOf { it.requiredQty },
-                totalScannedQty = completed.sumOf { it.totalQty },
-                totalDiscrepancies = disc.size,
-                totalWrongPickings = wrong.size,
-                auditorName = currentUser.value.name,
-                auditorId = currentUser.value.jobId
-            )
+        val snapshot = DailyAuditSnapshot(
+            id = "session-$today-${System.currentTimeMillis() % 10000}",
+            date = today,
+            closedAt = Instant.now().toString(),
+            totalInvoices = summary.totalMasterInvoices.takeIf { it > 0 }
+                ?: master.map { it.invoiceNo }.distinct().size,
+            completedInvoices = summary.auditedInvoicesCount.takeIf { it > 0 } ?: completed.size,
+            totalItems = summary.totalItemsCount.takeIf { it > 0 } ?: master.size,
+            totalRequiredQty = summary.totalRequiredQty.takeIf { it > 0 } ?: master.sumOf { it.requiredQty },
+            totalScannedQty = summary.totalScannedQty.takeIf { it > 0 } ?: completed.sumOf { it.totalQty },
+            totalDiscrepancies = summary.totalDiscrepanciesCount.takeIf { it > 0 } ?: disc.size,
+            totalWrongPickings = wrong.size,
+            auditorName = user.name,
+            auditorId = user.jobId,
+            auditorSignature = effectiveSig,
+            exactInvoicesCount = summary.exactInvoicesCount,
+            discrepancyInvoicesCount = summary.discrepancyInvoicesCount,
+            invoiceDetails = summary.invoiceDetails,
+            notes = notes ?: "اعتماد كامل تقرير جلسة التدقيق (${summary.auditedInvoicesCount} فاتورة • الدقة ${summary.matchAccuracyPercent}%)"
+        )
+
+        _showSessionApprovalModal.value = false
+        viewModelScope.launch {
+            if (!signatureBase64.isNullOrBlank() && s.auditorSignatureBase64.isNullOrBlank()) {
+                repository.saveSettings(s.copy(auditorSignatureBase64 = signatureBase64))
+            }
             repository.upsertDailySnapshot(snapshot)
-            _statusMessage.value = "تم ترحيل وإغلاق الوردية اليومية ($today)"
+            playTone(WmsAudioTone.EXACT_COMPLETE)
+            _statusMessage.value = "تم اعتماد وتوقيع كامل تقرير الجلسة (${snapshot.completedInvoices} فاتورة • فروقات: ${snapshot.totalDiscrepancies})"
         }
+        return snapshot
+    }
+
+    fun closeDailyShift() {
+        approveFullSessionReport()
     }
 
     // --- Receiving ---
@@ -947,14 +1179,20 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- Returns Original Invoice PDF Extraction & Master Sync ---
-    fun importOriginalInvoicePdfForReturn(uri: Uri, displayName: String) {
+    fun importOriginalInvoicePdfForReturn(uri: Uri, displayName: String, engine: String = "AUTO") {
         viewModelScope.launch {
             _pdfExtractionState.value = PdfExtractionUiState.Loading
-            val res = repository.extractOriginalInvoicePdf(uri, displayName, masterItems.value)
+            val res = repository.extractOriginalInvoicePdf(
+                uri = uri,
+                displayName = displayName,
+                masterItems = masterItems.value,
+                packagingRules = packagingRules.value,
+                engine = engine
+            )
             res.onSuccess { extracted ->
                 _pdfExtractionState.value = PdfExtractionUiState.Success(extracted)
                 playTone(WmsAudioTone.INVOICE_REOPENED)
-                _statusMessage.value = "تم استخلاص ${extracted.items.size} صنف من الفاتورة ${extracted.invoiceNo.ifBlank { displayName }}"
+                _statusMessage.value = "تم استخلاص ${extracted.items.size} صنف ونقلها لتقرير المرتجع المبدئي (${extracted.invoiceNo.ifBlank { displayName }})"
             }.onFailure { err ->
                 val msg = err.message ?: "تعذر تحليل ملف الفاتورة PDF"
                 _pdfExtractionState.value = PdfExtractionUiState.Error(msg)
@@ -978,7 +1216,7 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             _pdfExtractionState.value = PdfExtractionUiState.Success(extracted)
             playTone(WmsAudioTone.INVOICE_REOPENED)
-            _statusMessage.value = "تمت مزامنة ${extracted.items.size} صنف من الفاتورة $cleanInv"
+            _statusMessage.value = "تمت مزامنة ${extracted.items.size} صنف ونقلها لتقرير المرتجع المبدئي ($cleanInv)"
         }
     }
 
@@ -1021,6 +1259,76 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         updateExtractedResult { res ->
             res.copy(items = res.items.map { if (it.id == itemId) it.copy(condition = condition) else it })
         }
+    }
+
+    fun updateExtractedPdfHeader(invoiceNo: String? = null, customerName: String? = null) {
+        updateExtractedResult { res ->
+            res.copy(
+                invoiceNo = invoiceNo ?: res.invoiceNo,
+                customerName = customerName ?: res.customerName
+            )
+        }
+    }
+
+    fun finalizePreliminaryReturnReport(signatureBase64: String? = null): ReturnReport? {
+        val current = _pdfExtractionState.value as? PdfExtractionUiState.Success ?: return null
+        val extracted = current.result
+        val selected = extracted.items.filter { it.isSelected && it.returnQty > 0 }
+        if (selected.isEmpty()) {
+            playTone(WmsAudioTone.MISMATCH_ALERT)
+            _statusMessage.value = "اختر عنصراً واحداً على الأقل من تقرير المرتجع المبدئي للاعتماد"
+            return null
+        }
+
+        val user = currentUser.value
+        val returnItems = selected.map { sel ->
+            val safeQty = sel.returnQty.coerceAtLeast(1)
+            val refund = ((safeQty * sel.unitPrice) * 100.0).roundToInt() / 100.0
+            ReturnSessionItem(
+                id = "retitem-${UUID.randomUUID().toString().take(8)}",
+                itemCode = sel.itemCode,
+                itemName = sel.itemName,
+                unit = sel.unit,
+                invoiceNo = extracted.invoiceNo.ifBlank { null },
+                sourceFile = extracted.sourceLabel,
+                invoicedQty = sel.invoicedQty,
+                subtotal = sel.lineTotal,
+                actualReturnedQty = safeQty,
+                unitPrice = sel.unitPrice,
+                refundTotal = refund,
+                condition = sel.condition
+            )
+        }
+
+        val hasLab = returnItems.any { it.condition == ReturnItemCondition.TRANSFERRED_TO_LAB }
+        val report = ReturnReport(
+            id = "ret-${UUID.randomUUID().toString().take(8)}",
+            returnReceiptNo = "RMA-${(1000..9999).random()}",
+            originalInvoiceNo = extracted.invoiceNo.ifBlank { "PDF-RMA" },
+            customerName = extracted.customerName.ifBlank { "عميل مرتجع" },
+            createdAt = Instant.now().toString(),
+            auditorName = user.name,
+            auditorId = user.jobId,
+            auditorSignature = signatureBase64 ?: settings.value.auditorSignatureBase64,
+            status = if (hasLab) ReturnReportStatus.PENDING_LAB else ReturnReportStatus.COMPLETED,
+            items = returnItems,
+            totalInvoicedQty = returnItems.sumOf { it.invoicedQty.coerceAtLeast(it.actualReturnedQty) },
+            totalReturnedQty = returnItems.sumOf { it.actualReturnedQty },
+            totalValidForRestockQty = returnItems.filter { it.condition == ReturnItemCondition.VALID_FOR_RESTOCK }
+                .sumOf { it.actualReturnedQty },
+            totalTransferredToLabQty = returnItems.filter { it.condition == ReturnItemCondition.TRANSFERRED_TO_LAB }
+                .sumOf { it.actualReturnedQty },
+            totalRefundAmount = (returnItems.sumOf { it.refundTotal } * 100.0).roundToInt() / 100.0,
+            notes = "مستخلص من تقرير المرتجع المبدئي (${extracted.extractionEngine})"
+        )
+
+        viewModelScope.launch {
+            repository.upsertReturnReport(report)
+            _pdfExtractionState.value = PdfExtractionUiState.Idle
+            playTone(WmsAudioTone.INVOICE_FINISHED)
+            _statusMessage.value = "تم اعتماد تقرير المرتجع النهائي ${report.returnReceiptNo} (${returnItems.size} أصناف)"
+        }
+        return report
     }
 
     fun clearExtractedPdfInvoice() {

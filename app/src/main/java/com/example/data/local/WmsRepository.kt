@@ -111,19 +111,26 @@ class WmsRepository(
     suspend fun finalizeAuditSession(
         discrepancies: List<AuditDiscrepancy>,
         completed: CompletedInvoiceRecord,
-        history: InvoiceAuditHistory
+        history: InvoiceAuditHistory,
+        clearActiveSession: Boolean = true
     ) = withContext(ioDispatcher) {
+        dao.deleteDiscrepanciesByInvoice(completed.invoiceNo)
+        dao.deleteAuditHistoryByInvoice(completed.invoiceNo)
         if (discrepancies.isNotEmpty()) {
             dao.insertDiscrepancies(discrepancies.map { DiscrepancyEntity.fromDomain(it) })
         }
         dao.upsertCompletedInvoice(CompletedInvoiceEntity.fromDomain(completed))
         dao.deleteIncompleteInvoice(completed.invoiceNo)
         dao.insertAuditHistory(AuditHistoryEntity.fromDomain(history))
-        prefs.saveActiveSession(null)
+        if (clearActiveSession) {
+            prefs.saveActiveSession(null)
+        }
     }
 
     suspend fun deleteCompletedInvoice(invoiceNo: String) = withContext(ioDispatcher) {
         dao.deleteCompletedInvoice(invoiceNo)
+        dao.deleteDiscrepanciesByInvoice(invoiceNo)
+        dao.deleteAuditHistoryByInvoice(invoiceNo)
     }
 
     suspend fun upsertDailySnapshot(snapshot: DailyAuditSnapshot) = withContext(ioDispatcher) {

@@ -34,11 +34,12 @@ object PdfService {
             var pageNum = 1
             var page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNum).create())
             var canvas = page.canvas
+            val totalScanned = completedInvoices.sumOf { it.totalQty }
             var y = drawHeader(
                 canvas,
-                "ISA 500 Audit & Discrepancy Report",
+                "ISA 500 Full Session Audit & Approval Report",
                 "Auditor: $auditorName ($auditorId)",
-                "Completed: ${completedInvoices.size} | Discrepancies: ${discrepancies.size} | Wrong Picks: ${wrongPicks.size}"
+                "Invoices: ${completedInvoices.size} | Scanned Qty: $totalScanned | Discrepancies: ${discrepancies.size} | Wrong Picks: ${wrongPicks.size}"
             )
 
             val rowPaint = Paint().apply { color = Color.DKGRAY; textSize = 10f }
@@ -46,6 +47,30 @@ object PdfService {
                 color = Color.rgb(15, 23, 42)
                 textSize = 10.5f
                 typeface = Typeface.DEFAULT_BOLD
+            }
+
+            if (completedInvoices.isNotEmpty()) {
+                canvas.drawText("Session Invoices Summary (${completedInvoices.size}):", MARGIN, y, headerPaint)
+                y += 15f
+                for (inv in completedInvoices) {
+                    if (y > PAGE_HEIGHT - 90f) {
+                        doc.finishPage(page)
+                        pageNum++
+                        page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNum).create())
+                        canvas = page.canvas
+                        y = MARGIN + 20f
+                    }
+                    val invDiscCount = discrepancies.count { it.invoiceNo == inv.invoiceNo }
+                    val invStatus = if (invDiscCount == 0) "EXACT" else "DISCREPANCY ($invDiscCount)"
+                    canvas.drawText(
+                        "Invoice ${inv.invoiceNo} | Items: ${inv.totalItems} | Scanned Qty: ${inv.totalQty} | Status: $invStatus",
+                        MARGIN,
+                        y,
+                        rowPaint
+                    )
+                    y += 14f
+                }
+                y += 10f
             }
 
             canvas.drawText("Invoice | Code | Item | Req | Act | Diff | Status", MARGIN, y, headerPaint)

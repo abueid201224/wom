@@ -32,6 +32,9 @@ interface WmsDao {
     @Query("DELETE FROM discrepancies WHERE id = :id")
     suspend fun deleteDiscrepancy(id: Long)
 
+    @Query("DELETE FROM discrepancies WHERE invoiceNo = :invoiceNo")
+    suspend fun deleteDiscrepanciesByInvoice(invoiceNo: String)
+
     @Query("DELETE FROM discrepancies")
     suspend fun clearDiscrepancies()
 
@@ -73,6 +76,9 @@ interface WmsDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditHistory(item: AuditHistoryEntity)
+
+    @Query("DELETE FROM audit_history WHERE invoiceNo = :invoiceNo")
+    suspend fun deleteAuditHistoryByInvoice(invoiceNo: String)
 
     @Query("SELECT * FROM daily_snapshots ORDER BY closedAt DESC")
     fun observeDailySnapshots(): Flow<List<DailySnapshotEntity>>

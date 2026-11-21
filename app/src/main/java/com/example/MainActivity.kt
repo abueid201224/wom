@@ -93,6 +93,9 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
     val inventoryDraftItems by viewModel.inventoryDraftItems.collectAsStateWithLifecycle()
     val isInventoryImportBusy by viewModel.isInventoryImportBusy.collectAsStateWithLifecycle()
     val pdfExtractionState by viewModel.pdfExtractionState.collectAsStateWithLifecycle()
+    val auditKpis by viewModel.auditScanningKpis.collectAsStateWithLifecycle()
+    val sessionApprovalSummary by viewModel.sessionApprovalSummary.collectAsStateWithLifecycle()
+    val showSessionApprovalModal by viewModel.showSessionApprovalModal.collectAsStateWithLifecycle()
 
     DisposableEffect(context) {
         val receiver = PdaBroadcastScanner.register(context) { scannedCode ->
@@ -191,6 +194,16 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
         }
         if (showGuideModal) {
             LogicGuideModal(isRtl = isRtl, onDismiss = { showGuideModal = false })
+        }
+        if (showSessionApprovalModal) {
+            FullSessionApprovalDialog(
+                isRtl = isRtl,
+                auditorName = settings.auditorName,
+                summary = sessionApprovalSummary,
+                onDismiss = { viewModel.dismissSessionApprovalModal() },
+                onApproveWithSignature = { sig -> viewModel.approveFullSessionReport(sig) },
+                onExportPdf = { viewModel.exportDiscrepanciesPdf() }
+            )
         }
 
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -400,7 +413,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                             viewModel.startOrOpenInvoice(inv)
                                             navigateTo(WmsRoute.ActiveAudit)
                                         },
-                                        onCloseShift = { viewModel.closeDailyShift() },
+                                        onCloseShift = { viewModel.openSessionApprovalModal() },
                                         onOpenExcel = { showExcelModal = true },
                                         onOpenCloud = { showCloudModal = true }
                                     )
@@ -408,26 +421,30 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
 
                                 composable<WmsRoute.ActiveAudit> {
                                     ActiveAuditScreen(
-                                        isRtl = isRtl,
-                                        settings = settings,
-                                        activeSession = activeSession,
-                                        masterItems = masterItems,
-                                        completedInvoices = completedInvoices,
-                                        scanBanner = scanBanner,
-                                        pendingLongBarcode = pendingLongBarcode,
-                                        onDismissBanner = { viewModel.clearScanBanner() },
-                                        onResolveLongBarcode = { allow -> viewModel.resolvePendingLongBarcode(allow) },
-                                        onOpenInvoice = { inv -> viewModel.startOrOpenInvoice(inv) },
-                                        onProcessScan = { raw -> viewModel.processAuditScan(raw, bypassDebounce = true) },
-                                        onAdjustQty = { key, delta -> viewModel.adjustAuditItemQty(key, delta) },
-                                        onSuspendSession = { viewModel.suspendCurrentSessionToIncomplete() },
-                                        onFinalizeSession = { sig -> viewModel.finalizeActiveAuditSession(sig) },
-                                        onReopenCompleted = { inv -> viewModel.reopenCompletedInvoice(inv) },
-                                        onChangeSortMode = { mode ->
-                                            viewModel.updateSettings { it.copy(itemSortMode = mode) }
-                                        }
-                                    )
-                                }
+                                         isRtl = isRtl,
+                                         settings = settings,
+                                         activeSession = activeSession,
+                                         masterItems = masterItems,
+                                         completedInvoices = completedInvoices,
+                                         auditKpis = auditKpis,
+                                         sessionSummary = sessionApprovalSummary,
+                                         scanBanner = scanBanner,
+                                         pendingLongBarcode = pendingLongBarcode,
+                                         onDismissBanner = { viewModel.clearScanBanner() },
+                                         onResolveLongBarcode = { allow -> viewModel.resolvePendingLongBarcode(allow) },
+                                         onOpenInvoice = { inv -> viewModel.startOrOpenInvoice(inv) },
+                                         onProcessScan = { raw -> viewModel.processAuditScan(raw, bypassDebounce = true) },
+                                         onAdjustQty = { key, delta -> viewModel.adjustAuditItemQty(key, delta) },
+                                         onSuspendSession = { viewModel.suspendCurrentSessionToIncomplete() },
+                                         onCloseInvoice = { viewModel.closeActiveInvoice() },
+                                         onOpenSessionApproval = { viewModel.openSessionApprovalModal() },
+                                         onExportSessionPdf = { viewModel.exportDiscrepanciesPdf() },
+                                         onReopenCompleted = { inv -> viewModel.reopenCompletedInvoice(inv) },
+                                         onChangeSortMode = { mode ->
+                                             viewModel.updateSettings { it.copy(itemSortMode = mode) }
+                                         }
+                                     )
+                                 }
 
                                 composable<WmsRoute.Receiving> {
                                     ReceivingScreen(
@@ -449,8 +466,8 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         masterItems = masterItems,
                                         pdfExtractionState = pdfExtractionState,
                                         isCloudBusy = isCloudBusy,
-                                        onImportOriginalPdf = { uri, name ->
-                                            viewModel.importOriginalInvoicePdfForReturn(uri, name)
+                                        onImportOriginalPdf = { uri, name, engine ->
+                                            viewModel.importOriginalInvoicePdfForReturn(uri, name, engine)
                                         },
                                         onSyncMasterInvoice = { invNo ->
                                             viewModel.syncOriginalInvoiceForReturn(invNo)
@@ -467,6 +484,12 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         onUpdatePdfItemCondition = { id, cond ->
                                             viewModel.updateExtractedPdfItemCondition(id, cond)
                                         },
+                                        onUpdatePdfHeader = { invNo, cust ->
+                                            viewModel.updateExtractedPdfHeader(invNo, cust)
+                                        },
+                                        onFinalizePreliminaryReturn = { sig ->
+                                            viewModel.finalizePreliminaryReturnReport(sig)
+                                        },
                                         onClearExtractedPdf = { viewModel.clearExtractedPdfInvoice() },
                                         onSaveReturnReport = { rep -> viewModel.saveReturnReport(rep) },
                                         onLabDecision = { id, dec, notes -> viewModel.updateReturnLabDecision(id, dec, notes) },
@@ -481,6 +504,8 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         discrepancies = discrepancies,
                                         wrongPicks = wrongPicks,
                                         auditHistory = auditHistory,
+                                        sessionSummary = sessionApprovalSummary,
+                                        onOpenSessionApproval = { viewModel.openSessionApprovalModal() },
                                         onExportCsv = { viewModel.exportDiscrepanciesCsv() },
                                         onExportPdf = { viewModel.exportDiscrepanciesPdf() },
                                         onDeleteDiscrepancy = { id -> viewModel.deleteDiscrepancy(id) },

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,6 +27,8 @@ fun ErrorReportScreen(
     discrepancies: List<AuditDiscrepancy>,
     wrongPicks: List<WrongPickingRecord>,
     auditHistory: List<InvoiceAuditHistory>,
+    sessionSummary: SessionApprovalSummary = SessionApprovalSummary(),
+    onOpenSessionApproval: () -> Unit = {},
     onExportCsv: () -> Unit,
     onExportPdf: () -> Unit,
     onDeleteDiscrepancy: (Long) -> Unit,
@@ -41,6 +44,72 @@ fun ErrorReportScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        item(key = "reports_session_approval_card") {
+            Surface(
+                shape = MaterialTheme.shapes.large,
+                color = if (sessionSummary.isSessionApproved) Emerald950 else Slate900,
+                border = BorderStroke(
+                    1.dp,
+                    if (sessionSummary.isSessionApproved) Emerald400 else Indigo400.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = s.t("تقرير اعتماد الجلسة الشامل", "Full Session Approval Report"),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = Slate100
+                            )
+                            Text(
+                                text = s.t(
+                                    "الفواتير: ${sessionSummary.auditedInvoicesCount}/${sessionSummary.totalMasterInvoices} • المسح: ${sessionSummary.totalScannedQty}/${sessionSummary.totalRequiredQty} • الدقة: ${sessionSummary.matchAccuracyPercent}%",
+                                    "Invoices: ${sessionSummary.auditedInvoicesCount}/${sessionSummary.totalMasterInvoices} • Scanned: ${sessionSummary.totalScannedQty}/${sessionSummary.totalRequiredQty} • Accuracy: ${sessionSummary.matchAccuracyPercent}%"
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Slate300
+                            )
+                        }
+                        StatusPill(
+                            label = if (sessionSummary.isSessionApproved)
+                                s.t("معتمد", "Approved")
+                            else if (sessionSummary.isAllMasterInvoicesFinished)
+                                s.t("جاهز للاعتماد", "Ready")
+                            else
+                                s.t("قيد التنفيذ", "In Progress"),
+                            color = if (sessionSummary.isSessionApproved) Emerald400 else Cyan400
+                        )
+                    }
+                    Button(
+                        onClick = onOpenSessionApproval,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("error_report_open_approval_button"),
+                        colors = ButtonDefaults.buttonColors(containerColor = Indigo500, contentColor = Slate100)
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.FactCheck, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (sessionSummary.isSessionApproved)
+                                s.t("عرض التقرير المعتمد والتفاصيل", "View Approved Report & Details")
+                            else
+                                s.t("عرض التفاصيل واعتماد كامل التقرير", "View Details & Approve Full Report")
+                        )
+                    }
+                }
+            }
+        }
+
         item(key = "reports_kpi_row") {
             Row(
                 modifier = Modifier.fillMaxWidth(),

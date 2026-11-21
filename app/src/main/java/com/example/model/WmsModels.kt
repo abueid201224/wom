@@ -137,17 +137,33 @@ data class ActiveInvoiceSession(
 ) {
     val totalRequiredQty: Int get() = items.values.sumOf { it.requiredQty }
     val totalScannedQty: Int get() = items.values.sumOf { it.actualQty }
-    val remainingQty: Int get() = (totalRequiredQty - totalScannedQty).coerceAtLeast(0)
-    val exactItemsCount: Int get() = items.values.count { it.qtyStatus == QtyStatus.EXACT }
+    val effectiveScannedQty: Int get() = items.values.sumOf { minOf(it.actualQty, it.requiredQty).coerceAtLeast(0) }
+    val remainingQty: Int get() = (totalRequiredQty - effectiveScannedQty).coerceAtLeast(0)
+    val exactItemsCount: Int get() = items.values.count { it.qtyStatus == QtyStatus.EXACT && it.codeStatus == CodeStatus.MATCH }
     val totalItemsCount: Int get() = items.size
     val progressPercent: Int get() {
         if (items.isEmpty() || totalRequiredQty <= 0) return 0
-        return ((totalScannedQty.toDouble() / totalRequiredQty) * 100).toInt().coerceIn(0, 100)
+        return kotlin.math.round((effectiveScannedQty.toDouble() / totalRequiredQty) * 100.0).toInt().coerceIn(0, 100)
     }
     val isFullyCompleted: Boolean get() = items.isNotEmpty() && items.values.all {
         it.qtyStatus == QtyStatus.EXACT && it.codeStatus == CodeStatus.MATCH
     }
 }
+
+data class AuditScanningKpis(
+    val totalInvoices: Int = 0,
+    val completedInvoices: Int = 0,
+    val remainingInvoices: Int = 0,
+    val totalRequiredQty: Int = 0,
+    val totalScannedQty: Int = 0,
+    val totalEffectiveScannedQty: Int = 0,
+    val remainingQty: Int = 0,
+    val overallProgressPercent: Int = 0,
+    val activeInvoiceProgressPercent: Int = 0,
+    val activeInvoiceScannedQty: Int = 0,
+    val activeInvoiceRequiredQty: Int = 0,
+    val activeInvoiceRemainingQty: Int = 0
+)
 
 @Serializable
 data class IncompleteInvoiceRecord(
@@ -231,6 +247,44 @@ data class InvoiceAuditHistory(
 )
 
 @Serializable
+data class SessionInvoiceDetailRow(
+    val invoiceNo: String,
+    val orderNo: String? = null,
+    val requiredItemsCount: Int = 0,
+    val scannedItemsCount: Int = 0,
+    val exactItemsCount: Int = 0,
+    val requiredQty: Int = 0,
+    val scannedQty: Int = 0,
+    val discrepancyCount: Int = 0,
+    val shortageQty: Int = 0,
+    val surplusQty: Int = 0,
+    val status: String = "EXACT",
+    val completedAt: String = ""
+)
+
+data class SessionApprovalSummary(
+    val totalMasterInvoices: Int = 0,
+    val auditedInvoicesCount: Int = 0,
+    val remainingInvoicesCount: Int = 0,
+    val exactInvoicesCount: Int = 0,
+    val discrepancyInvoicesCount: Int = 0,
+    val totalItemsCount: Int = 0,
+    val totalRequiredQty: Int = 0,
+    val totalScannedQty: Int = 0,
+    val matchAccuracyPercent: Int = 0,
+    val totalDiscrepanciesCount: Int = 0,
+    val shortageItemsCount: Int = 0,
+    val surplusItemsCount: Int = 0,
+    val totalShortageQty: Int = 0,
+    val totalSurplusQty: Int = 0,
+    val isAllMasterInvoicesFinished: Boolean = false,
+    val isSessionApproved: Boolean = false,
+    val latestApprovedSnapshot: DailyAuditSnapshot? = null,
+    val invoiceDetails: List<SessionInvoiceDetailRow> = emptyList(),
+    val discrepancyDetails: List<AuditDiscrepancy> = emptyList()
+)
+
+@Serializable
 data class DailyAuditSnapshot(
     val id: String,
     val date: String,
@@ -244,6 +298,10 @@ data class DailyAuditSnapshot(
     val totalWrongPickings: Int,
     val auditorName: String? = null,
     val auditorId: String? = null,
+    val auditorSignature: String? = null,
+    val exactInvoicesCount: Int = 0,
+    val discrepancyInvoicesCount: Int = 0,
+    val invoiceDetails: List<SessionInvoiceDetailRow> = emptyList(),
     val notes: String? = null
 )
 

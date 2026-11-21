@@ -41,7 +41,7 @@ fun ReturnsScreen(
     masterItems: List<MasterInvoiceItem>,
     pdfExtractionState: PdfExtractionUiState,
     isCloudBusy: Boolean,
-    onImportOriginalPdf: (Uri, String) -> Unit,
+    onImportOriginalPdf: (Uri, String, String) -> Unit,
     onSyncMasterInvoice: (String) -> Unit,
     onRestoreReturnsFromCloud: () -> Unit,
     onTogglePdfItem: (String) -> Unit,
@@ -49,6 +49,8 @@ fun ReturnsScreen(
     onUpdatePdfItemReturnQty: (String, Int) -> Unit,
     onUpdatePdfItemPrice: (String, Double) -> Unit,
     onUpdatePdfItemCondition: (String, ReturnItemCondition) -> Unit,
+    onUpdatePdfHeader: (String?, String?) -> Unit,
+    onFinalizePreliminaryReturn: (String?) -> Unit,
     onClearExtractedPdf: () -> Unit,
     onSaveReturnReport: (ReturnReport) -> Unit,
     onLabDecision: (reportId: String, decision: LabDecision, notes: String) -> Unit,
@@ -65,7 +67,9 @@ fun ReturnsScreen(
     var itemQty by remember { mutableStateOf("1") }
     var itemPrice by remember { mutableStateOf("50.0") }
     var selectedCondition by remember { mutableStateOf(ReturnItemCondition.VALID_FOR_RESTOCK) }
+    var selectedOcrEngine by remember { mutableStateOf("AUTO") }
     var showSignature by remember { mutableStateOf(false) }
+    var showPreliminarySignature by remember { mutableStateOf(false) }
     var showMasterInvoiceDialog by remember { mutableStateOf(false) }
     var masterInvoiceQuery by remember { mutableStateOf("") }
 
@@ -93,7 +97,7 @@ fun ReturnsScreen(
                     displayName = cursor.getString(col) ?: displayName
                 }
             }
-            onImportOriginalPdf(uri, displayName)
+            onImportOriginalPdf(uri, displayName, selectedOcrEngine)
         }
     }
 
@@ -203,6 +207,18 @@ fun ReturnsScreen(
         )
     }
 
+    if (showPreliminarySignature) {
+        AuditorSignatureModal(
+            isRtl = isRtl,
+            auditorName = currentUser.name,
+            onDismiss = { showPreliminarySignature = false },
+            onSignatureSaved = { b64 ->
+                showPreliminarySignature = false
+                onFinalizePreliminaryReturn(b64)
+            }
+        )
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -221,18 +237,39 @@ fun ReturnsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        s.t("استيراد ومزامنة الفاتورة الأصلية (PDF / RTL OCR)", "Original Invoice PDF Import & Sync"),
+                        s.t("استيراد ومزامنة الفاتورة الأصلية (ML Kit OCR / RTL)", "Original Invoice PDF Import (ML Kit OCR / RTL)"),
                         style = MaterialTheme.typography.titleMedium,
                         color = Cyan400
                     )
                     Text(
                         s.t(
-                            "استخلص بنود الفاتورة وكمياتها وأسعارها تلقائياً مع دعم العربية RTL وافتحها لاختيار المرتجع",
-                            "Extract invoice lines, quantities & prices with Arabic RTL OCR and pick items to return"
+                            "استخلاص عناصر الفاتورة وكمياتها وأسعارها عبر ML Kit مع دعم العربية RTL ونقلها تلقائياً إلى تقرير المرتجع المبدئي",
+                            "Extract invoice items, quantities & prices via ML Kit Arabic RTL OCR into a Preliminary Return Report"
                         ),
                         style = MaterialTheme.typography.bodySmall,
                         color = Slate400
                     )
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        FilterChip(
+                            selected = selectedOcrEngine == "AUTO",
+                            onClick = { selectedOcrEngine = "AUTO" },
+                            label = { Text(s.t("تلقائي (ML Kit + RTL)", "Auto (ML Kit + RTL)")) }
+                        )
+                        FilterChip(
+                            selected = selectedOcrEngine == "ML_KIT",
+                            onClick = { selectedOcrEngine = "ML_KIT" },
+                            label = { Text(s.t("ML Kit على الجهاز", "On-Device ML Kit")) }
+                        )
+                        FilterChip(
+                            selected = selectedOcrEngine == "GEMINI",
+                            onClick = { selectedOcrEngine = "GEMINI" },
+                            label = { Text(s.t("Gemini RTL OCR", "Gemini RTL OCR")) }
+                        )
+                    }
 
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -248,7 +285,7 @@ fun ReturnsScreen(
                         ) {
                             Icon(Icons.Rounded.DocumentScanner, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text(s.t("استيراد فاتورة PDF (OCR عربي)", "Import Invoice PDF (Arabic OCR)"))
+                            Text(s.t("استيراد فاتورة PDF (ML Kit)", "Import Invoice PDF (ML Kit)"))
                         }
 
                         OutlinedButton(
@@ -335,18 +372,20 @@ fun ReturnsScreen(
             val extracted = pdfExtractionState.result
             val selectedItems = extracted.items.filter { it.isSelected }
             val allSelected = extracted.items.isNotEmpty() && selectedItems.size == extracted.items.size
+            val selectedTotalQty = selectedItems.sumOf { it.returnQty }
             val selectedTotalRefund = selectedItems.sumOf { it.returnQty * it.unitPrice }
 
             item(key = "returns_extracted_header") {
                 CompositionLocalProvider(LocalLayoutDirection provides if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr) {
                     Surface(
+                        modifier = Modifier.testTag("preliminary_return_report_card"),
                         shape = MaterialTheme.shapes.large,
                         color = Slate900,
-                        border = BorderStroke(1.5.dp, Emerald500.copy(alpha = 0.5f))
+                        border = BorderStroke(1.5.dp, Emerald500.copy(alpha = 0.6f))
                     ) {
                         Column(
                             modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -356,17 +395,19 @@ fun ReturnsScreen(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = s.t(
-                                            "عناصر الفاتورة المستخلصة (${extracted.items.size})",
-                                            "Extracted Invoice Items (${extracted.items.size})"
+                                            "تقرير المرتجع المبدئي (مسودة الفاتورة)",
+                                            "Preliminary Return Report (Draft)"
                                         ),
                                         style = MaterialTheme.typography.titleMedium,
                                         color = Emerald400
                                     )
                                     Text(
-                                        text = "${s.t("الفاتورة:", "Inv:")} ${extracted.invoiceNo.ifBlank { "-" }}" +
-                                            if (extracted.customerName.isNotBlank()) " • ${extracted.customerName}" else "",
+                                        text = s.t(
+                                            "اختر العناصر والكميات المطلوب إرجاعها لإصدار تقرير المرتجع النهائي",
+                                            "Select items & quantities to generate the Final Return Report"
+                                        ),
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = Slate200
+                                        color = Slate300
                                     )
                                     Text(
                                         text = extracted.sourceLabel,
@@ -377,6 +418,7 @@ fun ReturnsScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     StatusPill(
                                         label = when (extracted.extractionEngine) {
+                                            "ML_KIT_OCR" -> s.t("ML Kit OCR عربي", "ML Kit OCR")
                                             "GEMINI_RTL_OCR" -> s.t("OCR عربي RTL", "Arabic RTL OCR")
                                             "MASTER_SYNC" -> s.t("مزامنة القاعدة", "Master Sync")
                                             else -> s.t("استخلاص محلي", "Local Match")
@@ -387,9 +429,26 @@ fun ReturnsScreen(
                                         onClick = onClearExtractedPdf,
                                         modifier = Modifier.size(48.dp)
                                     ) {
-                                        Icon(Icons.Rounded.Close, contentDescription = "Close Extracted Invoice", tint = Slate400)
+                                        Icon(Icons.Rounded.Close, contentDescription = "Close Preliminary Report", tint = Slate400)
                                     }
                                 }
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = extracted.invoiceNo,
+                                    onValueChange = { onUpdatePdfHeader(it, null) },
+                                    label = { Text(s.t("رقم الفاتورة", "Invoice No.")) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                OutlinedTextField(
+                                    value = extracted.customerName,
+                                    onValueChange = { onUpdatePdfHeader(null, it) },
+                                    label = { Text(s.t("اسم العميل", "Customer")) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
 
                             Row(
@@ -404,13 +463,13 @@ fun ReturnsScreen(
                                         modifier = Modifier.testTag("returns_select_all_pdf_items")
                                     )
                                     Text(
-                                        s.t("تحديد الكل", "Select All"),
+                                        s.t("تحديد الكل (${extracted.items.size})", "Select All (${extracted.items.size})"),
                                         style = MaterialTheme.typography.labelLarge,
                                         color = Slate100
                                     )
                                 }
                                 Text(
-                                    text = "${s.t("المحدد:", "Selected:")} ${selectedItems.size} • ${String.format(Locale.US, "%.2f", selectedTotalRefund)} ${extracted.currency}",
+                                    text = "${s.t("المختار:", "Picked:")} ${selectedItems.size} ($selectedTotalQty) • ${String.format(Locale.US, "%.2f", selectedTotalRefund)} ${extracted.currency}",
                                     style = MonoCodeStyle,
                                     color = Emerald400
                                 )
@@ -537,51 +596,73 @@ fun ReturnsScreen(
             }
 
             item(key = "returns_extracted_transfer_cta") {
-                Button(
-                    onClick = {
-                        if (selectedItems.isNotEmpty()) {
-                            if (invoiceNo.isBlank() && extracted.invoiceNo.isNotBlank()) {
-                                invoiceNo = extracted.invoiceNo
-                            }
-                            if (customerName.isBlank() && extracted.customerName.isNotBlank()) {
-                                customerName = extracted.customerName
-                            }
-                            selectedItems.forEach { sel ->
-                                draftItems.add(
-                                    ReturnSessionItem(
-                                        id = "retitem-${UUID.randomUUID().toString().take(8)}",
-                                        itemCode = sel.itemCode,
-                                        itemName = sel.itemName,
-                                        unit = sel.unit,
-                                        invoiceNo = extracted.invoiceNo.ifBlank { null },
-                                        sourceFile = extracted.sourceLabel,
-                                        invoicedQty = sel.invoicedQty,
-                                        subtotal = sel.lineTotal,
-                                        actualReturnedQty = sel.returnQty,
-                                        unitPrice = sel.unitPrice,
-                                        refundTotal = sel.returnQty * sel.unitPrice,
-                                        condition = sel.condition
-                                    )
-                                )
-                            }
-                            onClearExtractedPdf()
-                        }
-                    },
-                    enabled = selectedItems.isNotEmpty(),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 50.dp)
-                        .testTag("returns_transfer_selected_button"),
-                    colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
-                ) {
-                    Icon(Icons.Rounded.Checklist, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        s.t(
-                            "إضافة العناصر المختارة لتذكرة المرتجع (${selectedItems.size})",
-                            "Add Selected Items to RMA (${selectedItems.size})"
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { showPreliminarySignature = true },
+                        enabled = selectedItems.isNotEmpty(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 52.dp)
+                            .testTag("returns_finalize_final_report_button"),
+                        colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
+                    ) {
+                        Icon(Icons.Rounded.Verified, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            s.t(
+                                "اعتماد وتوقيع تقرير المرتجع النهائي (${selectedItems.size} صنف)",
+                                "Finalize & Sign Final Return Report (${selectedItems.size} items)"
+                            )
                         )
-                    )
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (selectedItems.isNotEmpty()) {
+                                if (invoiceNo.isBlank() && extracted.invoiceNo.isNotBlank()) {
+                                    invoiceNo = extracted.invoiceNo
+                                }
+                                if (customerName.isBlank() && extracted.customerName.isNotBlank()) {
+                                    customerName = extracted.customerName
+                                }
+                                selectedItems.forEach { sel ->
+                                    draftItems.add(
+                                        ReturnSessionItem(
+                                            id = "retitem-${UUID.randomUUID().toString().take(8)}",
+                                            itemCode = sel.itemCode,
+                                            itemName = sel.itemName,
+                                            unit = sel.unit,
+                                            invoiceNo = extracted.invoiceNo.ifBlank { null },
+                                            sourceFile = extracted.sourceLabel,
+                                            invoicedQty = sel.invoicedQty,
+                                            subtotal = sel.lineTotal,
+                                            actualReturnedQty = sel.returnQty,
+                                            unitPrice = sel.unitPrice,
+                                            refundTotal = sel.returnQty * sel.unitPrice,
+                                            condition = sel.condition
+                                        )
+                                    )
+                                }
+                                onClearExtractedPdf()
+                            }
+                        },
+                        enabled = selectedItems.isNotEmpty(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("returns_transfer_selected_button"),
+                        border = BorderStroke(1.dp, Cyan500.copy(alpha = 0.5f))
+                    ) {
+                        Icon(Icons.Rounded.Checklist, contentDescription = null, tint = Cyan400)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            s.t(
+                                "إضافة العناصر المختارة للتذكرة اليدوية (${selectedItems.size})",
+                                "Move Selected to Manual Ticket (${selectedItems.size})"
+                            ),
+                            color = Slate100
+                        )
+                    }
                 }
             }
         }
@@ -756,8 +837,8 @@ fun ReturnsScreen(
 
         item(key = "returns_reports_header") {
             SectionHeaderRow(
-                title = s.t("تقارير المرتجعات وتحكيم المختبر", "RMA Reports & Lab Arbitration"),
-                subtitle = s.t("${returnReports.size} تقرير", "${returnReports.size} reports")
+                title = s.t("تقارير المرتجع النهائية وتحكيم المختبر", "Final Return Reports & Lab Arbitration"),
+                subtitle = s.t("${returnReports.size} تقرير نهائي", "${returnReports.size} final reports")
             )
         }
 

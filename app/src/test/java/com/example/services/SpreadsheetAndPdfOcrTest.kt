@@ -112,4 +112,39 @@ class SpreadsheetAndPdfOcrTest {
         assertEquals("20450102", fallback?.invoiceNo)
         assertTrue((fallback?.items?.size ?: 0) > 0)
     }
+
+    @Test
+    fun mlKitInvoiceOcrService_parseExtractedText_extractsArabicRtlItemsQtyAndPrices() {
+        val lines = listOf(
+            "فاتورة رقم: ٢٠٤٥٠١٠١",
+            "العميل: شركة النخبة للتجارة",
+            "١١٤١١٠٠٥٥  طقم سكاكين ستيل  ٤  ١٢٠٫٥٠  ٤٨٢٫٠٠",
+            "SKU998811  مقلاة تيفال ٢٨ سم  ٣  ٨٥.٠٠  ٢٥٥.٠٠"
+        )
+        val rawText = lines.joinToString("\n")
+        val result = MlKitInvoiceOcrService.parseExtractedText(
+            rawDocumentText = rawText,
+            lines = lines,
+            displayName = "invoice_ar.pdf",
+            masterItems = SeedData.defaultDemoMasterItems,
+            packagingRules = SeedData.defaultPackagingRules
+        )
+
+        assertEquals("20450101", result.invoiceNo)
+        assertEquals("شركة النخبة للتجارة", result.customerName)
+        assertEquals("ML_KIT_OCR", result.extractionEngine)
+        assertEquals(2, result.items.size)
+
+        val item1 = result.items[0]
+        assertEquals("114110055", item1.itemCode)
+        assertEquals(4, item1.invoicedQty)
+        assertEquals(120.5, item1.unitPrice, 0.01)
+        assertEquals(482.0, item1.lineTotal, 0.01)
+
+        val item2 = result.items[1]
+        assertEquals("SKU998811", item2.itemCode)
+        assertEquals(3, item2.invoicedQty)
+        assertEquals(85.0, item2.unitPrice, 0.01)
+        assertEquals(255.0, item2.lineTotal, 0.01)
+    }
 }

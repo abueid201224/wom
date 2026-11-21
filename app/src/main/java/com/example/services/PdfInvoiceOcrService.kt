@@ -70,7 +70,9 @@ object PdfInvoiceOcrService {
         packagingRules: List<PackagingGroupRule> = emptyList(),
         engine: String = "AUTO"
     ): Result<ExtractedPdfInvoiceResult> {
-        // 1. If explicit ML Kit or AUTO mode, run ML Kit Text Recognition first
+        var mlKitCached: ExtractedPdfInvoiceResult? = null
+
+        // 1. Run ML Kit Text Recognition integration service (on-device spatial RTL OCR)
         if (engine.equals("ML_KIT", ignoreCase = true) || engine.equals("AUTO", ignoreCase = true)) {
             val mlKitResult = MlKitInvoiceOcrService.extractFromPdf(
                 context = context,
@@ -81,23 +83,30 @@ object PdfInvoiceOcrService {
             )
             if (mlKitResult.isSuccess) {
                 val extracted = mlKitResult.getOrThrow()
-                if (extracted.items.isNotEmpty() || engine.equals("ML_KIT", ignoreCase = true)) {
+                mlKitCached = extracted
+                val hasMeaningfulNames = extracted.items.isNotEmpty() &&
+                    extracted.items.none { it.itemName.startsWith("صنف ") }
+                if (engine.equals("ML_KIT", ignoreCase = true) || hasMeaningfulNames) {
                     return Result.success(extracted)
                 }
-            }
-            if (engine.equals("ML_KIT", ignoreCase = true)) {
+            } else if (engine.equals("ML_KIT", ignoreCase = true)) {
                 return mlKitResult
             }
         }
 
-        // 2. Cloud Gemini AI Logic (with fallback)
+        // 2. Cloud Gemini AI Logic (multimodal Arabic RTL fallback / enrichment)
         val rawBytes = runCatching {
             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull() ?: return Result.failure(IllegalArgumentException("تعذر قراءة ملف PDF المحدد / Cannot read selected PDF file."))
+        }.getOrNull() ?: return if (mlKitCached != null && mlKitCached.items.isNotEmpty()) {
+            Result.success(mlKitCached)
+        } else {
+            Result.failure(IllegalArgumentException("تعذر قراءة ملف PDF المحدد / Cannot read selected PDF file."))
+        }
 
         val pageBitmaps = renderPdfPagesToBitmaps(context, uri)
         if (pageBitmaps.isEmpty()) {
-            val localOnly = extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
+            val localOnly = mlKitCached?.takeIf { it.items.isNotEmpty() }
+                ?: extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
             return if (localOnly != null) Result.success(localOnly)
             else Result.failure(IllegalStateException("الملف لا يحتوي على صفحات PDF صالحة للعرض / Invalid or empty PDF file."))
         }
@@ -127,7 +136,8 @@ object PdfInvoiceOcrService {
                 ?: throw IllegalStateException("أعاد نموذج OCR استجابة فارغة / OCR returned an empty response.")
             val parsed = parseStructuredInvoiceJson(jsonText, displayName)
             if (parsed.items.isEmpty()) {
-                val fallback = extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
+                val fallback = mlKitCached?.takeIf { it.items.isNotEmpty() }
+                    ?: extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
                 if (fallback != null) Result.success(fallback)
                 else Result.failure(IllegalStateException("لم يتم العثور على بنود أصناف داخل الفاتورة / No line items detected in invoice PDF."))
             } else {
@@ -135,14 +145,16 @@ object PdfInvoiceOcrService {
             }
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Arabic PDF OCR timed out", e)
-            val fallback = extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
+            val fallback = mlKitCached?.takeIf { it.items.isNotEmpty() }
+                ?: extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
             if (fallback != null) Result.success(fallback)
             else Result.failure(IllegalStateException("انتهت مهلة قراءة الفاتورة (60 ثانية). تحقق من الاتصال وأعد المحاولة."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Firebase AI PDF OCR failed", e)
-            val fallback = extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
+            val fallback = mlKitCached?.takeIf { it.items.isNotEmpty() }
+                ?: extractFallbackFromRawBytes(rawBytes, displayName, masterItems)
             if (fallback != null) Result.success(fallback)
             else Result.failure(e)
         } finally {
