@@ -123,6 +123,7 @@ data class ScannedAuditItem(
 
 @Serializable
 data class ActiveInvoiceSession(
+    val sessionId: String = "",
     val orderNo: String? = null,
     val invoiceNo: String,
     val auditorName: String? = null,
@@ -130,6 +131,7 @@ data class ActiveInvoiceSession(
     val auditorSignature: String? = null,
     val startedAt: String,
     val lastActivityAt: String,
+    val lastCheckpointAtMs: Long = 0L,
     val items: Map<String, ScannedAuditItem> = emptyMap(),
     val isLocked: Boolean = false,
     val lastScannedItemCode: String? = null,
@@ -163,6 +165,13 @@ data class AuditScanningKpis(
     val activeInvoiceScannedQty: Int = 0,
     val activeInvoiceRequiredQty: Int = 0,
     val activeInvoiceRemainingQty: Int = 0
+)
+
+data class PendingInvoiceSwitchConfirmation(
+    val currentInvoiceNo: String,
+    val targetInvoiceNo: String,
+    val firstScannedAtMs: Long,
+    val expiresAtMs: Long
 )
 
 @Serializable
@@ -587,6 +596,7 @@ data class AppSettings(
     val scannerPrefixInvoice: String = "INV-",
     val scannerMinLength: Int = 3,
     val autoSwitchOnNewInvoice: Boolean = true,
+    val requireDoubleScanToSwitchInvoice: Boolean = false,
     val itemSortMode: ItemSortMode = ItemSortMode.LAST_SCANNED,
     val enableCameraQr: Boolean = true,
     val longBarcodeThreshold: Int = 10,

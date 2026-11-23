@@ -5,8 +5,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.AssignmentReturn
+import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -15,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -26,6 +29,7 @@ import com.example.ui.components.StatusPill
 import com.example.ui.components.WmsKpiCard
 import com.example.ui.navigation.WmsRoute
 import com.example.ui.theme.*
+import com.google.firebase.auth.FirebaseUser
 
 private data class QuickModuleTile(
     val route: WmsRoute,
@@ -42,6 +46,8 @@ private data class QuickModuleTile(
 fun WelcomeDashboardScreen(
     isRtl: Boolean,
     currentUser: AppUser,
+    firebaseUser: FirebaseUser? = null,
+    cloudReturnsCount: Int = 0,
     syncMetadata: SyncMetadata,
     masterItems: List<MasterInvoiceItem>,
     completedInvoices: List<CompletedInvoiceRecord>,
@@ -50,6 +56,7 @@ fun WelcomeDashboardScreen(
     returnReports: List<ReturnReport>,
     pickingWaves: List<BatchPickingWave>,
     dailySnapshots: List<DailyAuditSnapshot>,
+    sessionSummary: SessionApprovalSummary = SessionApprovalSummary(),
     onNavigate: (WmsRoute) -> Unit,
     onResumeIncomplete: (String) -> Unit,
     onCloseShift: () -> Unit,
@@ -59,6 +66,9 @@ fun WelcomeDashboardScreen(
     val s = WmsStrings(isRtl)
     val totalInvoices by remember(masterItems) {
         derivedStateOf { masterItems.asSequence().map { it.invoiceNo }.distinct().count() }
+    }
+    val remainingToAuditCount by remember(totalInvoices, completedInvoices) {
+        derivedStateOf { (totalInvoices - completedInvoices.size).coerceAtLeast(0) }
     }
     val pendingLabCount by remember(returnReports) {
         derivedStateOf { returnReports.count { it.status == ReturnReportStatus.PENDING_LAB } }
@@ -117,18 +127,75 @@ fun WelcomeDashboardScreen(
                         }
                         StatusPill(currentUser.jobId, Emerald400)
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        StatusPill(
+                            label = if (firebaseUser != null)
+                                s.t("سحابي: ${firebaseUser.email?.substringBefore('@') ?: "متصل"} ($cloudReturnsCount)", "Cloud: ${firebaseUser.email?.substringBefore('@') ?: "Connected"} ($cloudReturnsCount)")
+                            else
+                                s.t("الوضع المحلي أوفلاين", "Local Offline Mode"),
+                            color = if (firebaseUser != null) Cyan400 else Amber400
+                        )
+                        StatusPill(
+                            label = when {
+                                sessionSummary.isSessionApproved -> s.t("الجلسة معتمدة", "Session Approved")
+                                sessionSummary.isAllMasterInvoicesFinished -> s.t("جاهز للاعتماد الشامل", "Ready for Approval")
+                                else -> s.t("جاهز للتدقيق: $remainingToAuditCount", "Ready: $remainingToAuditCount")
+                            },
+                            color = when {
+                                sessionSummary.isSessionApproved -> Emerald400
+                                sessionSummary.isAllMasterInvoicesFinished -> Indigo400
+                                else -> Cyan400
+                            }
+                        )
+                    }
+                    if (totalInvoices > 0) {
+                        val sessionFraction = (completedInvoices.size.toFloat() / totalInvoices.coerceAtLeast(1)).coerceIn(0f, 1f)
+                        LinearProgressIndicator(
+                            progress = { sessionFraction },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(4.dp)),
+                            color = if (remainingToAuditCount == 0) Emerald400 else Cyan400,
+                            trackColor = Slate800
+                        )
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            onClick = { onNavigate(WmsRoute.ActiveAudit) },
+                            onClick = {
+                                if (sessionSummary.isAllMasterInvoicesFinished && !sessionSummary.isSessionApproved) {
+                                    onCloseShift()
+                                } else {
+                                    onNavigate(WmsRoute.ActiveAudit)
+                                }
+                            },
                             modifier = Modifier
                                 .weight(1f)
                                 .defaultMinSize(minHeight = 48.dp)
                                 .testTag("dash_start_audit_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (sessionSummary.isAllMasterInvoicesFinished && !sessionSummary.isSessionApproved) Indigo500 else Emerald500,
+                                contentColor = if (sessionSummary.isAllMasterInvoicesFinished && !sessionSummary.isSessionApproved) Color.White else Slate950
+                            )
                         ) {
-                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null)
+                            Icon(
+                                if (sessionSummary.isAllMasterInvoicesFinished && !sessionSummary.isSessionApproved)
+                                    Icons.AutoMirrored.Rounded.FactCheck
+                                else
+                                    Icons.Rounded.QrCodeScanner,
+                                contentDescription = null
+                            )
                             Spacer(Modifier.width(6.dp))
-                            Text(s.t("بدء التدقيق", "Start Audit"))
+                            Text(
+                                if (sessionSummary.isAllMasterInvoicesFinished && !sessionSummary.isSessionApproved)
+                                    s.t("اعتماد تقرير الجلسة", "Approve Full Report")
+                                else
+                                    s.t("بدء التدقيق", "Start Audit")
+                            )
                         }
                         OutlinedButton(
                             onClick = onOpenExcel,
@@ -144,7 +211,7 @@ fun WelcomeDashboardScreen(
                                 .defaultMinSize(minHeight = 48.dp)
                                 .testTag("dash_cloud_button")
                         ) {
-                            Icon(Icons.Rounded.CloudSync, contentDescription = "Cloud Sync", tint = Indigo400)
+                            Icon(Icons.Rounded.CloudSync, contentDescription = "Cloud Sync", tint = if (firebaseUser != null) Cyan400 else Indigo400)
                         }
                     }
                 }
@@ -161,7 +228,7 @@ fun WelcomeDashboardScreen(
                     WmsKpiCard(
                         title = s.t("الفواتير المكتملة", "Completed"),
                         value = "${completedInvoices.size}/$totalInvoices",
-                        subtitle = s.t("بقاعدة البيانات", "of master DB"),
+                        subtitle = s.t("متبقي $remainingToAuditCount للتدقيق", "$remainingToAuditCount ready to audit"),
                         icon = Icons.Rounded.Verified,
                         accentColor = Emerald400,
                         modifier = Modifier.weight(1f),

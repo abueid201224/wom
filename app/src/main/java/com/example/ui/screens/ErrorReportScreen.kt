@@ -89,6 +89,23 @@ fun ErrorReportScreen(
                             color = if (sessionSummary.isSessionApproved) Emerald400 else Cyan400
                         )
                     }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        StatusPill(
+                            label = s.t("مطابقة: ${sessionSummary.exactInvoicesCount}", "Exact: ${sessionSummary.exactInvoicesCount}"),
+                            color = Emerald400
+                        )
+                        StatusPill(
+                            label = s.t("عجز: -${sessionSummary.totalShortageQty}", "Short: -${sessionSummary.totalShortageQty}"),
+                            color = if (sessionSummary.totalShortageQty == 0) Emerald400 else Rose400
+                        )
+                        StatusPill(
+                            label = s.t("زيادة: +${sessionSummary.totalSurplusQty}", "Surplus: +${sessionSummary.totalSurplusQty}"),
+                            color = if (sessionSummary.totalSurplusQty == 0) Emerald400 else Amber400
+                        )
+                    }
                     Button(
                         onClick = onOpenSessionApproval,
                         modifier = Modifier

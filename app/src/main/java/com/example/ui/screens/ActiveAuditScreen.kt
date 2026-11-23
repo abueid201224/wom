@@ -15,6 +15,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,6 +28,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -36,6 +40,8 @@ import com.example.ui.components.*
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.PendingLongBarcodePrompt
 import com.example.ui.viewmodel.ScanFeedbackBanner
+
+private enum class AuditItemFilter { ALL, REMAINING, COMPLETED, ERRORS }
 
 @Composable
 fun ActiveAuditScreen(
@@ -48,8 +54,13 @@ fun ActiveAuditScreen(
     sessionSummary: SessionApprovalSummary,
     scanBanner: ScanFeedbackBanner?,
     pendingLongBarcode: PendingLongBarcodePrompt?,
+    pendingInvoiceSwitch: PendingInvoiceSwitchConfirmation? = null,
     onDismissBanner: () -> Unit,
     onResolveLongBarcode: (Boolean) -> Unit,
+    onConfirmPendingSwitch: () -> Unit = {},
+    onDismissPendingSwitch: () -> Unit = {},
+    onToggleSound: () -> Unit = {},
+    onToggleVibration: () -> Unit = {},
     onOpenInvoice: (String) -> Unit,
     onProcessScan: (String) -> Unit,
     onAdjustQty: (String, Int) -> Unit,
@@ -63,6 +74,14 @@ fun ActiveAuditScreen(
     val s = WmsStrings(isRtl)
     var scanInput by remember { mutableStateOf("") }
     var showCameraModal by remember { mutableStateOf(false) }
+    var activeFilter by remember { mutableStateOf(AuditItemFilter.ALL) }
+    val barcodeFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(activeSession?.invoiceNo, showCameraModal, pendingLongBarcode) {
+        if (!showCameraModal && pendingLongBarcode == null) {
+            runCatching { barcodeFocusRequester.requestFocus() }
+        }
+    }
 
     val availableInvoices by remember(masterItems, completedInvoices) {
         derivedStateOf {
@@ -92,14 +111,24 @@ fun ActiveAuditScreen(
         animationSpec = tween(durationMillis = 320),
         label = "overall_audit_progress"
     )
-    val sortedEntries by remember(activeSession, settings.itemSortMode) {
+    val sortedEntries by remember(activeSession, settings.itemSortMode, activeFilter) {
         derivedStateOf {
             val sessionItems = activeSession?.items?.entries?.toList().orEmpty()
+            val filtered = when (activeFilter) {
+                AuditItemFilter.ALL -> sessionItems
+                AuditItemFilter.REMAINING -> sessionItems.filter { it.value.qtyStatus == QtyStatus.SHORTAGE }
+                AuditItemFilter.COMPLETED -> sessionItems.filter {
+                    it.value.qtyStatus == QtyStatus.EXACT && it.value.codeStatus == CodeStatus.MATCH
+                }
+                AuditItemFilter.ERRORS -> sessionItems.filter {
+                    it.value.qtyStatus == QtyStatus.SURPLUS || it.value.codeStatus == CodeStatus.MISMATCH
+                }
+            }
             when (settings.itemSortMode) {
-                ItemSortMode.LAST_SCANNED -> sessionItems.sortedByDescending { it.value.lastScannedAt }
-                ItemSortMode.ORIGINAL_ORDER -> sessionItems.sortedBy { it.value.originalIndex }
-                ItemSortMode.PENDING_FIRST -> sessionItems.sortedBy { it.value.qtyStatus == QtyStatus.EXACT }
-                ItemSortMode.ERRORS_FIRST -> sessionItems.sortedBy {
+                ItemSortMode.LAST_SCANNED -> filtered.sortedByDescending { it.value.lastScannedAt }
+                ItemSortMode.ORIGINAL_ORDER -> filtered.sortedBy { it.value.originalIndex }
+                ItemSortMode.PENDING_FIRST -> filtered.sortedBy { it.value.qtyStatus == QtyStatus.EXACT }
+                ItemSortMode.ERRORS_FIRST -> filtered.sortedBy {
                     it.value.codeStatus == CodeStatus.MATCH && it.value.qtyStatus == QtyStatus.EXACT
                 }
             }
@@ -173,11 +202,13 @@ fun ActiveAuditScreen(
                                     if (scanInput.isNotBlank()) {
                                         onProcessScan(scanInput)
                                         scanInput = ""
+                                        runCatching { barcodeFocusRequester.requestFocus() }
                                     }
                                 }
                             ),
                             modifier = Modifier
                                 .weight(1f)
+                                .focusRequester(barcodeFocusRequester)
                                 .testTag("audit_barcode_input")
                         )
                         FilledIconButton(
@@ -185,6 +216,7 @@ fun ActiveAuditScreen(
                                 if (scanInput.isNotBlank()) {
                                     onProcessScan(scanInput)
                                     scanInput = ""
+                                    runCatching { barcodeFocusRequester.requestFocus() }
                                 }
                             },
                             modifier = Modifier
@@ -203,6 +235,98 @@ fun ActiveAuditScreen(
                                 colors = IconButtonDefaults.filledIconButtonColors(containerColor = Indigo500, contentColor = Slate100)
                             ) {
                                 Icon(Icons.Rounded.PhotoCamera, contentDescription = "Open Camera Scanner")
+                            }
+                        }
+                    }
+
+                    // Quick Audio/Vibration & Switch Guard Status Strip
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = settings.soundEnabled,
+                            onClick = onToggleSound,
+                            modifier = Modifier.testTag("audit_quick_sound_toggle"),
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (settings.soundEnabled) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
+                                    contentDescription = s.t("تبديل الصوت", "Toggle Sound"),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    if (settings.soundEnabled) s.t("الصوت نشط", "Sound On") else s.t("صامت", "Muted"),
+                                    maxLines = 1
+                                )
+                            }
+                        )
+                        FilterChip(
+                            selected = settings.vibrationEnabled,
+                            onClick = onToggleVibration,
+                            modifier = Modifier.testTag("audit_quick_vibration_toggle"),
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Vibration,
+                                    contentDescription = s.t("تبديل الاهتزاز", "Toggle Haptics"),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    if (settings.vibrationEnabled) s.t("الاهتزاز", "Haptics") else s.t("بدون اهتزاز", "No Haptics"),
+                                    maxLines = 1
+                                )
+                            }
+                        )
+                        if (settings.requireDoubleScanToSwitchInvoice) {
+                            StatusPill(s.t("حماية 2x", "2x Guard"), Amber400)
+                        }
+                    }
+
+                    if (pendingInvoiceSwitch != null) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("pending_invoice_switch_banner"),
+                            shape = MaterialTheme.shapes.medium,
+                            color = Amber950,
+                            border = BorderStroke(1.5.dp, Amber400)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = s.t(
+                                        "الفاتورة ${pendingInvoiceSwitch.currentInvoiceNo} مفتوحة — امسح ${pendingInvoiceSwitch.targetInvoiceNo} مجدداً خلال ثانيتين أو اضغط تأكيد للإغلاق والتبديل.",
+                                        "Invoice ${pendingInvoiceSwitch.currentInvoiceNo} is open — scan ${pendingInvoiceSwitch.targetInvoiceNo} again within 2s or confirm switch."
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Amber400
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = onConfirmPendingSwitch,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .defaultMinSize(minHeight = 48.dp)
+                                            .testTag("confirm_invoice_switch_button"),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Amber500, contentColor = Slate950)
+                                    ) {
+                                        Text(s.t("إغلاق وتبديل الآن", "Close & Switch"))
+                                    }
+                                    OutlinedButton(
+                                        onClick = onDismissPendingSwitch,
+                                        modifier = Modifier
+                                            .defaultMinSize(minHeight = 48.dp)
+                                            .testTag("dismiss_invoice_switch_button")
+                                    ) {
+                                        Text(s.t("إلغاء", "Cancel"), color = Slate200)
+                                    }
+                                }
                             }
                         }
                     }
@@ -521,6 +645,23 @@ fun ActiveAuditScreen(
                         )
 
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(AuditItemFilter.entries, key = { "flt_${it.name}" }) { filter ->
+                                val label = when (filter) {
+                                    AuditItemFilter.ALL -> s.t("الكل (${activeSession.items.size})", "All (${activeSession.items.size})")
+                                    AuditItemFilter.REMAINING -> s.t("المتبقي", "Remaining")
+                                    AuditItemFilter.COMPLETED -> s.t("المكتمل", "Completed")
+                                    AuditItemFilter.ERRORS -> s.t("الفروقات", "Errors")
+                                }
+                                FilterChip(
+                                    selected = activeFilter == filter,
+                                    onClick = { activeFilter = filter },
+                                    modifier = Modifier.testTag("audit_filter_${filter.name.lowercase()}"),
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
+
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(ItemSortMode.entries, key = { it.name }) { mode ->
                                 val label = when (mode) {
                                     ItemSortMode.LAST_SCANNED -> s.t("الأحدث مسحاً", "Recent")
@@ -573,57 +714,89 @@ fun ActiveAuditScreen(
                     else -> Cyan400
                 }
                 val isLast = activeSession.lastScannedItemCode == key
+                val itemFraction = if (item.requiredQty > 0) {
+                    (item.actualQty.toFloat() / item.requiredQty).coerceIn(0f, 1f)
+                } else 1f
                 Surface(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("audit_item_card_${item.itemCode}"),
                     shape = MaterialTheme.shapes.medium,
-                    color = if (isLast) accent.copy(alpha = 0.11f) else Slate900,
-                    border = BorderStroke(if (isLast) 1.5.dp else 1.dp, accent.copy(alpha = 0.55f))
+                    color = if (isLast) accent.copy(alpha = 0.14f) else Slate900,
+                    border = BorderStroke(if (isLast) 2.dp else 1.dp, accent.copy(alpha = if (isLast) 0.9f else 0.45f))
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier.padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(item.itemName, style = MaterialTheme.typography.titleSmall, color = Slate100)
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        item.itemName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = Slate100,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (isLast) {
+                                        StatusPill(s.t("آخر مسح", "Last"), accent)
+                                    }
+                                }
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(item.itemCode, style = MonoCodeStyle, color = accent)
+                                    StatusPill(item.unit, Slate300)
+                                }
+                            }
+
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
-                                Text(item.itemCode, style = MonoCodeStyle, color = accent)
-                                StatusPill(item.unit, Slate300)
+                                IconButton(
+                                    onClick = { onAdjustQty(key, -1) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("audit_dec_${item.itemCode}")
+                                ) {
+                                    Icon(Icons.Rounded.RemoveCircleOutline, contentDescription = "Decrease", tint = Slate300)
+                                }
+                                Text(
+                                    text = "${item.actualQty}/${item.requiredQty}",
+                                    style = MonoMetricStyle,
+                                    color = accent
+                                )
+                                IconButton(
+                                    onClick = { onAdjustQty(key, +1) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("audit_inc_${item.itemCode}")
+                                ) {
+                                    Icon(Icons.Rounded.AddCircleOutline, contentDescription = "Increase", tint = Emerald400)
+                                }
                             }
                         }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            IconButton(
-                                onClick = { onAdjustQty(key, -1) },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("audit_dec_${item.itemCode}")
-                            ) {
-                                Icon(Icons.Rounded.RemoveCircleOutline, contentDescription = "Decrease", tint = Slate300)
-                            }
-                            Text(
-                                text = "${item.actualQty}/${item.requiredQty}",
-                                style = MonoMetricStyle,
-                                color = accent
-                            )
-                            IconButton(
-                                onClick = { onAdjustQty(key, +1) },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("audit_inc_${item.itemCode}")
-                            ) {
-                                Icon(Icons.Rounded.AddCircleOutline, contentDescription = "Increase", tint = Emerald400)
-                            }
-                        }
+                        LinearProgressIndicator(
+                            progress = { itemFraction },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = accent,
+                            trackColor = Slate800
+                        )
                     }
                 }
             }

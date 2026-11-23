@@ -167,6 +167,12 @@ fun SettingsScreen(
                     tag = "settings_autoswitch_switch"
                 ) { checked -> onUpdateSettings { it.copy(autoSwitchOnNewInvoice = checked) } }
 
+                SettingSwitchRow(
+                    title = s.t("وضع أمان التبديل (يتطلب مسح الفاتورة مرتين خلال ثانيتين)", "Switch Guard (Require 2x scan within 2s)"),
+                    checked = settings.requireDoubleScanToSwitchInvoice,
+                    tag = "settings_double_scan_switch"
+                ) { checked -> onUpdateSettings { it.copy(requireDoubleScanToSwitchInvoice = checked) } }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,

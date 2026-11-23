@@ -35,8 +35,13 @@ fun FullSessionApprovalDialog(
 ) {
     val s = WmsStrings(isRtl)
     var showDetails by remember { mutableStateOf(false) }
+    var onlyErrorInvoices by remember { mutableStateOf(false) }
     var showSignatureModal by remember { mutableStateOf(false) }
     var expandedInvoiceNo by remember { mutableStateOf<String?>(null) }
+    val filteredInvoices = remember(summary.invoiceDetails, onlyErrorInvoices) {
+        if (onlyErrorInvoices) summary.invoiceDetails.filter { it.discrepancyCount > 0 }
+        else summary.invoiceDetails
+    }
 
     if (showSignatureModal) {
         AuditorSignatureModal(
@@ -261,13 +266,36 @@ fun FullSessionApprovalDialog(
                     // Expandable Invoice & Discrepancy Details
                     if (showDetails) {
                         item(key = "details_invoices_header") {
-                            SectionHeaderRow(
-                                title = s.t("تفاصيل الفواتير الممسوحة", "Audited Invoices Breakdown"),
-                                subtitle = s.t("اضغط على أي فاتورة لعرض أصناف الفروقات الخاصة بها", "Tap an invoice to inspect its discrepancy items")
-                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                SectionHeaderRow(
+                                    title = s.t("تفاصيل الفواتير الممسوحة", "Audited Invoices Breakdown"),
+                                    subtitle = s.t("اضغط على أي فاتورة لعرض أصناف الفروقات الخاصة بها", "Tap an invoice to inspect its discrepancy items")
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    FilterChip(
+                                        selected = !onlyErrorInvoices,
+                                        onClick = { onlyErrorInvoices = false },
+                                        modifier = Modifier.testTag("approval_filter_all_invoices"),
+                                        label = { Text("${s.t("الكل", "All")} (${summary.invoiceDetails.size})") }
+                                    )
+                                    FilterChip(
+                                        selected = onlyErrorInvoices,
+                                        onClick = { onlyErrorInvoices = true },
+                                        modifier = Modifier.testTag("approval_filter_error_invoices"),
+                                        label = { Text("${s.t("بفروقات فقط", "Errors Only")} (${summary.discrepancyInvoicesCount})") }
+                                    )
+                                }
+                                if (filteredInvoices.isEmpty()) {
+                                    EmptyStatePanel(
+                                        icon = Icons.Rounded.Verified,
+                                        title = s.t("لا توجد فواتير بفروقات", "Zero Error Invoices"),
+                                        description = s.t("جميع الفواتير المغلقة مطابقة بنسبة 100%.", "All closed invoices matched 100%.")
+                                    )
+                                }
+                            }
                         }
 
-                        items(summary.invoiceDetails, key = { "detail_${it.invoiceNo}" }) { row ->
+                        items(filteredInvoices, key = { "detail_${it.invoiceNo}" }) { row ->
                             val invDiscs = summary.discrepancyDetails.filter { it.invoiceNo == row.invoiceNo }
                             val isExpanded = expandedInvoiceNo == row.invoiceNo
                             val accent = if (row.discrepancyCount == 0) Emerald400 else Rose400

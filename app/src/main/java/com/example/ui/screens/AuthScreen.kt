@@ -200,14 +200,14 @@ fun AuthScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 s.t("ملف المشغل الميداني (أوفلاين)", "Local Field Operator"),
                                 style = MaterialTheme.typography.titleSmall,
                                 color = Slate100
                             )
                             Text(
-                                "${currentUser.name} • ${if (isRtl) roleDef?.labelAr else roleDef?.labelEn}",
+                                "${currentUser.name} • ${if (isRtl) roleDef?.labelAr else roleDef?.labelEn} (${currentUser.jobId})",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Emerald400
                             )
@@ -220,6 +220,26 @@ fun AuthScreen(
                         ) {
                             Text(s.t("تغيير الدور", "Switch"), color = Cyan400)
                         }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        StatusPill(
+                            label = if (roleDef?.canReopenDocuments == true)
+                                s.t("صلاحية إعادة فتح الفواتير", "Can Reopen")
+                            else
+                                s.t("وضع التدقيق القياسي", "Standard Audit"),
+                            color = if (roleDef?.canReopenDocuments == true) Indigo400 else Slate300
+                        )
+                        StatusPill(
+                            label = if (roleDef?.canApproveLab == true)
+                                s.t("اعتماد المختبر", "Lab Approval")
+                            else
+                                s.t("تشغيل محلي سريع", "Fast Local"),
+                            color = if (roleDef?.canApproveLab == true) Amber400 else Emerald400
+                        )
                     }
 
                     OutlinedButton(

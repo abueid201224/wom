@@ -268,7 +268,9 @@ class WmsRepository(
         signatureBase64: String?,
         discrepancies: List<AuditDiscrepancy>,
         wrongPicks: List<WrongPickingRecord>,
-        completedInvoices: List<CompletedInvoiceRecord>
+        completedInvoices: List<CompletedInvoiceRecord>,
+        sessionSummary: SessionApprovalSummary? = null,
+        isRtl: Boolean = true
     ): Result<File> = withContext(ioDispatcher) {
         PdfService.exportDiscrepancyAuditPdf(
             context = context,
@@ -277,7 +279,9 @@ class WmsRepository(
             signatureBase64 = signatureBase64,
             discrepancies = discrepancies,
             wrongPicks = wrongPicks,
-            completedInvoices = completedInvoices
+            completedInvoices = completedInvoices,
+            sessionSummary = sessionSummary,
+            isRtl = isRtl
         )
     }
 

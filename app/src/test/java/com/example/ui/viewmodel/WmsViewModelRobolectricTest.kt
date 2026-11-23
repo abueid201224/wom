@@ -6,6 +6,7 @@ import com.example.WmsApplication
 import com.example.model.CodeStatus
 import com.example.model.QtyStatus
 import com.example.model.ReturnItemCondition
+import com.example.services.WmsAudioTone
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
@@ -40,9 +41,23 @@ class WmsViewModelRobolectricTest {
         app = ApplicationProvider.getApplicationContext()
         runBlocking {
             app.database.ensureSeeded()
+            val dao = app.database.wmsDao()
+            dao.clearCompletedInvoices()
+            dao.clearIncompleteInvoices()
+            dao.clearDiscrepancies()
+            dao.clearWrongPicks()
+            dao.clearAuditHistory()
+            dao.clearDailySnapshots()
+            app.preferencesManager.saveActiveSession(null)
+            app.preferencesManager.saveSettings(com.example.model.AppSettings())
         }
         viewModel = WmsViewModel(app)
-        waitUntil { viewModel.masterItems.value.isNotEmpty() && viewModel.packagingRules.value.isNotEmpty() }
+        waitUntil {
+            viewModel.masterItems.value.isNotEmpty() &&
+                viewModel.packagingRules.value.isNotEmpty() &&
+                viewModel.completedInvoices.value.isEmpty() &&
+                viewModel.activeSession.value == null
+        }
     }
 
     @After
@@ -277,5 +292,149 @@ class WmsViewModelRobolectricTest {
         assertEquals(2, savedSnapshot.exactInvoicesCount)
         assertEquals(1, savedSnapshot.discrepancyInvoicesCount)
         assertEquals(3, savedSnapshot.invoiceDetails.size)
+    }
+
+    @Test
+    fun rapidConcurrentScanBurst_reopenDeduplication_doubleScanGuard_andCheckpointRecovery() {
+        // 1. Open 20450101 and inject a rapid burst of 30 concurrent scans across multiple threads
+        assertTrue(viewModel.startOrOpenInvoice("20450101"))
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450101" }
+        val initialSessionId = viewModel.activeSession.value?.sessionId.orEmpty()
+        assertTrue(initialSessionId.startsWith("ses-"))
+
+        val threads = (1..3).map {
+            Thread {
+                repeat(10) {
+                    viewModel.processAuditScan("511107200", qtyMultiplier = 1, bypassDebounce = true)
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+
+        waitUntil { viewModel.activeSession.value?.items?.get("511107200")?.actualQty == 30 }
+        assertEquals(30, viewModel.activeSession.value?.items?.get("511107200")?.actualQty)
+
+        // 2. Simulate unexpected restart: wait for checkpoint flush, recreate ViewModel & verify sessionId + counts
+        waitUntil {
+            (viewModel.activeSession.value?.lastCheckpointAtMs ?: 0L) > 0L &&
+                !viewModel.isCheckpointPending.value
+        }
+        val restoredVm = WmsViewModel(app)
+        waitUntil {
+            restoredVm.activeSession.value?.invoiceNo == "20450101" &&
+                restoredVm.activeSession.value?.items?.get("511107200")?.actualQty == 30
+        }
+        assertEquals(initialSessionId, restoredVm.activeSession.value?.sessionId)
+
+        // 3. Close invoice with discrepancies, then reopen and fix to exact -> NO duplicate discrepancies remain
+        restoredVm.closeActiveInvoice()
+        waitUntil {
+            restoredVm.activeSession.value == null &&
+                restoredVm.completedInvoices.value.any { it.invoiceNo == "20450101" } &&
+                restoredVm.discrepancies.value.any { it.invoiceNo == "20450101" }
+        }
+        restoredVm.reopenCompletedInvoice("20450101")
+        waitUntil {
+            restoredVm.activeSession.value?.invoiceNo == "20450101" &&
+                restoredVm.discrepancies.value.none { it.invoiceNo == "20450101" }
+        }
+        restoredVm.processAuditScan("114110055", qtyMultiplier = 4, bypassDebounce = true)
+        restoredVm.processAuditScan("511107200", qtyMultiplier = 10, bypassDebounce = true)
+        restoredVm.processAuditScan("310044112", qtyMultiplier = 6, bypassDebounce = true)
+        waitUntil { restoredVm.activeSession.value?.isFullyCompleted == true }
+
+        // 4. Enable Double-Scan Switch Guard -> 1st scan of 20450102 warns, 2nd scan within 2s auto-closes 20450101 & opens 20450102
+        restoredVm.updateSettings { it.copy(requireDoubleScanToSwitchInvoice = true) }
+        waitUntil { restoredVm.settings.value.requireDoubleScanToSwitchInvoice }
+
+        restoredVm.processAuditScan("20450102", bypassDebounce = true)
+        waitUntil { restoredVm.pendingInvoiceSwitch.value?.targetInvoiceNo == "20450102" }
+        assertEquals("20450101", restoredVm.activeSession.value?.invoiceNo)
+
+        restoredVm.processAuditScan("20450102", bypassDebounce = true)
+        waitUntil {
+            restoredVm.activeSession.value?.invoiceNo == "20450102" &&
+                restoredVm.pendingInvoiceSwitch.value == null &&
+                restoredVm.completedInvoices.value.any { it.invoiceNo == "20450101" }
+        }
+        assertEquals(0, restoredVm.discrepancies.value.count { it.invoiceNo == "20450101" })
+
+        // Reset double-scan setting for clean shared app prefs state
+        restoredVm.updateSettings { it.copy(requireDoubleScanToSwitchInvoice = false) }
+        waitUntil { !restoredVm.settings.value.requireDoubleScanToSwitchInvoice }
+    }
+
+    @Test
+    fun audioAlerts_allScenariosEmitDistinctTones_andMuteDoesNotInterruptScanning() {
+        viewModel.clearToneHistory()
+
+        // 1. Open invoice 20450101 -> INVOICE_REOPENED
+        assertTrue(viewModel.startOrOpenInvoice("20450101"))
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450101" }
+        assertEquals(WmsAudioTone.INVOICE_REOPENED, viewModel.lastPlayedTone.value)
+
+        // 2. Partial scan -> MATCH
+        viewModel.processAuditScan("114110055", qtyMultiplier = 1, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.items?.get("114110055")?.actualQty == 1 }
+        assertEquals(WmsAudioTone.MATCH, viewModel.lastPlayedTone.value)
+
+        // 3. Complete item to 4/4 -> EXACT_COMPLETE
+        viewModel.processAuditScan("114110055", qtyMultiplier = 3, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.items?.get("114110055")?.actualQty == 4 }
+        assertEquals(WmsAudioTone.EXACT_COMPLETE, viewModel.lastPlayedTone.value)
+
+        // 4. Surplus scan -> SURPLUS_WARNING
+        viewModel.processAuditScan("114110055", qtyMultiplier = 1, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.items?.get("114110055")?.actualQty == 5 }
+        assertEquals(WmsAudioTone.SURPLUS_WARNING, viewModel.lastPlayedTone.value)
+
+        // 5. Outside barcode rejection -> MISMATCH_ALERT (not added to session)
+        viewModel.processAuditScan("999000111", bypassDebounce = true)
+        waitUntil { viewModel.lastPlayedTone.value == WmsAudioTone.MISMATCH_ALERT }
+        assertNull(viewModel.activeSession.value?.items?.get("999000111"))
+
+        // 6. Close invoice 20450101 while 20450102 & 20450103 remain -> INVOICE_FINISHED
+        viewModel.closeActiveInvoice()
+        waitUntil {
+            viewModel.activeSession.value == null &&
+                viewModel.lastPlayedTone.value == WmsAudioTone.INVOICE_FINISHED
+        }
+
+        // 7. Mute audio + vibration and verify scanning still advances normally across 20450102 & 20450103
+        viewModel.updateSettings { it.copy(soundEnabled = false, vibrationEnabled = false) }
+        waitUntil { !viewModel.settings.value.soundEnabled && !viewModel.settings.value.vibrationEnabled }
+
+        assertTrue(viewModel.startOrOpenInvoice("20450102"))
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450102" }
+        viewModel.processAuditScan("211088401", qtyMultiplier = 12, bypassDebounce = true)
+        viewModel.processAuditScan("512001122", qtyMultiplier = 20, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.isFullyCompleted == true }
+        viewModel.closeActiveInvoice()
+        waitUntil { viewModel.completedInvoices.value.any { it.invoiceNo == "20450102" } }
+
+        // 8. Complete final invoice 20450103 -> triggers SESSION_COMPLETED_FANFARE & FullSessionApprovalModal
+        assertTrue(viewModel.startOrOpenInvoice("20450103"))
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450103" }
+        viewModel.processAuditScan("810033445", qtyMultiplier = 6, bypassDebounce = true)
+        viewModel.processAuditScan("114110055", qtyMultiplier = 2, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.isFullyCompleted == true }
+        viewModel.closeActiveInvoice()
+        waitUntil {
+            viewModel.showSessionApprovalModal.value &&
+                viewModel.playedToneHistory.value.contains(WmsAudioTone.SESSION_COMPLETED_FANFARE)
+        }
+        assertEquals(WmsAudioTone.SESSION_COMPLETED_FANFARE, viewModel.lastPlayedTone.value)
+        assertTrue(viewModel.playedToneHistory.value.containsAll(
+            listOf(
+                WmsAudioTone.INVOICE_REOPENED,
+                WmsAudioTone.MATCH,
+                WmsAudioTone.EXACT_COMPLETE,
+                WmsAudioTone.SURPLUS_WARNING,
+                WmsAudioTone.MISMATCH_ALERT,
+                WmsAudioTone.INVOICE_FINISHED,
+                WmsAudioTone.SESSION_COMPLETED_FANFARE
+            )
+        ))
     }
 }

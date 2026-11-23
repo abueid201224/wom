@@ -8,6 +8,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -96,6 +98,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
     val auditKpis by viewModel.auditScanningKpis.collectAsStateWithLifecycle()
     val sessionApprovalSummary by viewModel.sessionApprovalSummary.collectAsStateWithLifecycle()
     val showSessionApprovalModal by viewModel.showSessionApprovalModal.collectAsStateWithLifecycle()
+    val pendingInvoiceSwitch by viewModel.pendingInvoiceSwitch.collectAsStateWithLifecycle()
 
     DisposableEffect(context) {
         val receiver = PdaBroadcastScanner.register(context) { scannedCode ->
@@ -246,6 +249,20 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                 )
                             },
                             actions = {
+                                IconButton(
+                                    onClick = {
+                                        viewModel.updateSettings { it.copy(soundEnabled = !it.soundEnabled) }
+                                    },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("topbar_sound_toggle")
+                                ) {
+                                    Icon(
+                                        imageVector = if (settings.soundEnabled) Icons.AutoMirrored.Rounded.VolumeUp else Icons.AutoMirrored.Rounded.VolumeOff,
+                                        contentDescription = s.t("تبديل الصوت", "Toggle Sound"),
+                                        tint = if (settings.soundEnabled) Emerald400 else Rose400
+                                    )
+                                }
                                 IconButton(
                                     onClick = { showExcelModal = true },
                                     modifier = Modifier
@@ -400,6 +417,8 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                     WelcomeDashboardScreen(
                                         isRtl = isRtl,
                                         currentUser = currentUser,
+                                        firebaseUser = firebaseUser,
+                                        cloudReturnsCount = cloudReturnsCount,
                                         syncMetadata = syncMetadata,
                                         masterItems = masterItems,
                                         completedInvoices = completedInvoices,
@@ -408,6 +427,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         returnReports = returnReports,
                                         pickingWaves = pickingWaves,
                                         dailySnapshots = dailySnapshots,
+                                        sessionSummary = sessionApprovalSummary,
                                         onNavigate = navigateTo,
                                         onResumeIncomplete = { inv ->
                                             viewModel.startOrOpenInvoice(inv)
@@ -430,8 +450,17 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                          sessionSummary = sessionApprovalSummary,
                                          scanBanner = scanBanner,
                                          pendingLongBarcode = pendingLongBarcode,
+                                         pendingInvoiceSwitch = pendingInvoiceSwitch,
                                          onDismissBanner = { viewModel.clearScanBanner() },
                                          onResolveLongBarcode = { allow -> viewModel.resolvePendingLongBarcode(allow) },
+                                         onConfirmPendingSwitch = { viewModel.confirmPendingInvoiceSwitch() },
+                                         onDismissPendingSwitch = { viewModel.dismissPendingInvoiceSwitch() },
+                                         onToggleSound = {
+                                             viewModel.updateSettings { it.copy(soundEnabled = !it.soundEnabled) }
+                                         },
+                                         onToggleVibration = {
+                                             viewModel.updateSettings { it.copy(vibrationEnabled = !it.vibrationEnabled) }
+                                         },
                                          onOpenInvoice = { inv -> viewModel.startOrOpenInvoice(inv) },
                                          onProcessScan = { raw -> viewModel.processAuditScan(raw, bypassDebounce = true) },
                                          onAdjustQty = { key, delta -> viewModel.adjustAuditItemQty(key, delta) },

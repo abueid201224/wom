@@ -80,11 +80,17 @@ interface WmsDao {
     @Query("DELETE FROM audit_history WHERE invoiceNo = :invoiceNo")
     suspend fun deleteAuditHistoryByInvoice(invoiceNo: String)
 
+    @Query("DELETE FROM audit_history")
+    suspend fun clearAuditHistory()
+
     @Query("SELECT * FROM daily_snapshots ORDER BY closedAt DESC")
     fun observeDailySnapshots(): Flow<List<DailySnapshotEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDailySnapshot(item: DailySnapshotEntity)
+
+    @Query("DELETE FROM daily_snapshots")
+    suspend fun clearDailySnapshots()
 
     @Query("SELECT * FROM return_reports ORDER BY createdAt DESC")
     fun observeReturnReports(): Flow<List<ReturnReportEntity>>
