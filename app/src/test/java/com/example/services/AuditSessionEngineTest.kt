@@ -106,4 +106,55 @@ class AuditSessionEngineTest {
         val confirmed = AuditSessionEngine.evaluateInvoiceSwitchGuard(session, "INV-1002", true, prompt, 2500L)
         assertEquals(AuditSessionEngine.SwitchSafetyDecision.ProceedImmediately, confirmed)
     }
+
+    @Test
+    fun deferralRequiresSupervisorAfterFifthAttempt_andBlocksFullSessionCompletionWhileDeferred() {
+        val master = sampleMaster()
+        var session = AuditSessionEngine.buildNewSession(
+            invoiceRows = master.filter { it.invoiceNo == "INV-1001" },
+            auditorName = "Trial Auditor",
+            auditorId = "AUD-TRIAL"
+        )
+
+        // Attempts 1..5 (currentDeferCount 0..4) are free for non-supervisor
+        for (c in 0 until 5) {
+            assertFalse(AuditSessionEngine.requiresSupervisorForDefer(c, UserRole.AUDITOR, requireSupervisorOverride = true))
+        }
+        // Attempt 6+ (currentDeferCount >= 5) requires Supervisor PIN when gate is active
+        assertTrue(AuditSessionEngine.requiresSupervisorForDefer(5, UserRole.AUDITOR, requireSupervisorOverride = true))
+        assertTrue(AuditSessionEngine.requiresSupervisorForDefer(6, UserRole.WAREHOUSE_KEEPER, requireSupervisorOverride = true))
+        // Supervisor or disabled gate (trial bypass) never requires extra PIN prompt
+        assertFalse(AuditSessionEngine.requiresSupervisorForDefer(5, UserRole.SUPERVISOR, requireSupervisorOverride = true))
+        assertFalse(AuditSessionEngine.requiresSupervisorForDefer(5, UserRole.AUDITOR, requireSupervisorOverride = false))
+
+        // Build deferred record with shortages snapshot
+        session = (AuditSessionEngine.applyItemScan(session, "114110055", 6, master)
+            as AuditSessionEngine.ItemScanOutcome.Updated).updatedSession
+        val deferred = AuditSessionEngine.buildDeferredInvoiceRecord(
+            session = session,
+            auditorName = "Trial Auditor",
+            auditorId = "AUD-TRIAL",
+            recordShortagesReport = true
+        )
+        assertEquals(1, deferred.deferCount)
+        assertTrue(deferred.recordShortagesReport)
+        assertEquals(14, deferred.missingQty) // (10-6) + 10 = 14
+        assertEquals(2, deferred.shortageItemsSnapshot.size)
+
+        // Even if INV-1002 was closed, session is NOT finished while INV-1001 remains deferred
+        val s2 = AuditSessionEngine.buildNewSession(master.filter { it.invoiceNo == "INV-1002" }, "Trial Auditor", "AUD-TRIAL")
+        val (_, comp2, hist2) = AuditSessionEngine.buildClosedInvoiceArtifacts(s2, "Trial Auditor", "AUD-TRIAL")
+        val summary = AuditSessionEngine.buildSessionApprovalSummary(
+            master = master,
+            completed = listOf(comp2),
+            history = listOf(hist2),
+            rawDiscrepancies = emptyList(),
+            snapshots = emptyList(),
+            activeSession = null,
+            incomplete = listOf(deferred)
+        )
+        assertFalse(summary.isAllMasterInvoicesFinished)
+        assertEquals(1, summary.deferredInvoicesCount)
+        assertEquals(1, summary.incompleteShortageInvoicesCount)
+    }
 }

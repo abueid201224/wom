@@ -228,7 +228,10 @@ fun WelcomeDashboardScreen(
                     WmsKpiCard(
                         title = s.t("الفواتير المكتملة", "Completed"),
                         value = "${completedInvoices.size}/$totalInvoices",
-                        subtitle = s.t("متبقي $remainingToAuditCount للتدقيق", "$remainingToAuditCount ready to audit"),
+                        subtitle = if (incompleteInvoices.isNotEmpty())
+                            s.t("مرحّل للاستكمال: ${incompleteInvoices.size}", "${incompleteInvoices.size} deferred")
+                        else
+                            s.t("متبقي $remainingToAuditCount للتدقيق", "$remainingToAuditCount ready to audit"),
                         icon = Icons.Rounded.Verified,
                         accentColor = Emerald400,
                         modifier = Modifier.weight(1f),
@@ -270,12 +273,12 @@ fun WelcomeDashboardScreen(
             }
         }
 
-        // Incomplete Suspended Sessions
+        // Deferred Invoices for Completion
         if (incompleteInvoices.isNotEmpty()) {
             item(key = "dash_suspended_sessions") {
                 SectionHeaderRow(
-                    title = s.t("فواتير معلّقة للاستئناف", "Suspended Invoices"),
-                    subtitle = s.t("${incompleteInvoices.size} فاتورة قيد التدقيق", "${incompleteInvoices.size} pending resume")
+                    title = s.t("فواتير مرحّلة للاستكمال", "Deferred Invoices"),
+                    subtitle = s.t("${incompleteInvoices.size} فاتورة قيد الاستكمال وإعادة المسح", "${incompleteInvoices.size} pending completion")
                 )
                 Spacer(Modifier.height(8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -283,11 +286,11 @@ fun WelcomeDashboardScreen(
                         Surface(
                             onClick = { onResumeIncomplete(rec.invoiceNo) },
                             modifier = Modifier
-                                .width(220.dp)
+                                .width(240.dp)
                                 .testTag("resume_incomplete_${rec.invoiceNo}"),
                             shape = MaterialTheme.shapes.medium,
                             color = Amber950,
-                            border = BorderStroke(1.dp, Amber500.copy(alpha = 0.4f))
+                            border = BorderStroke(1.dp, Amber500.copy(alpha = 0.45f))
                         ) {
                             Column(
                                 modifier = Modifier.padding(12.dp),
@@ -295,13 +298,29 @@ fun WelcomeDashboardScreen(
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(rec.invoiceNo, style = MonoCodeStyle, color = Amber400)
                                     Text("${rec.scannedQty}/${rec.totalRequiredQty}", style = MonoCodeStyle, color = Slate200)
                                 }
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    StatusPill(
+                                        label = s.t("محاولة ${rec.deferCount}/5", "Attempt ${rec.deferCount}/5"),
+                                        color = if (rec.deferCount >= 5) Rose400 else Amber400
+                                    )
+                                    if (rec.recordShortagesReport) {
+                                        StatusPill(
+                                            label = s.t("نواقص: ${rec.missingQty}", "Short: ${rec.missingQty}"),
+                                            color = Rose400
+                                        )
+                                    }
+                                }
                                 Text(
-                                    s.t("اضغط لاستئناف التدقيق", "Tap to resume audit"),
+                                    s.t("اضغط لإعادة المسح واستكمال الفاتورة", "Tap to re-scan & complete"),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Slate300
                                 )

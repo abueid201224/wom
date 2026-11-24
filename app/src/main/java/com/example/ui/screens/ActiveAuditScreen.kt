@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.automirrored.rounded.FactCheck
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
@@ -50,6 +51,7 @@ fun ActiveAuditScreen(
     activeSession: ActiveInvoiceSession?,
     masterItems: List<MasterInvoiceItem>,
     completedInvoices: List<CompletedInvoiceRecord>,
+    incompleteInvoices: List<IncompleteInvoiceRecord> = emptyList(),
     auditKpis: AuditScanningKpis,
     sessionSummary: SessionApprovalSummary,
     scanBanner: ScanFeedbackBanner?,
@@ -65,6 +67,7 @@ fun ActiveAuditScreen(
     onProcessScan: (String) -> Unit,
     onAdjustQty: (String, Int) -> Unit,
     onSuspendSession: () -> Unit,
+    onDeferWithShortages: () -> Unit = {},
     onCloseInvoice: () -> Unit,
     onOpenSessionApproval: () -> Unit,
     onExportSessionPdf: () -> Unit,
@@ -83,10 +86,11 @@ fun ActiveAuditScreen(
         }
     }
 
-    val availableInvoices by remember(masterItems, completedInvoices) {
+    val availableInvoices by remember(masterItems, completedInvoices, incompleteInvoices) {
         derivedStateOf {
             val completedSet = completedInvoices.map { it.invoiceNo }.toSet()
-            masterItems.map { it.invoiceNo }.distinct().filter { it !in completedSet }
+            val deferredSet = incompleteInvoices.map { it.invoiceNo }.toSet()
+            masterItems.map { it.invoiceNo }.distinct().filter { it !in completedSet && it !in deferredSet }
         }
     }
 
@@ -454,6 +458,66 @@ fun ActiveAuditScreen(
                 }
             }
 
+            if (incompleteInvoices.isNotEmpty()) {
+                item(key = "audit_deferred_header") {
+                    SectionHeaderRow(
+                        title = s.t("فواتير مرحّلة للاستكمال", "Deferred Invoices for Completion"),
+                        subtitle = s.t("${incompleteInvoices.size} فاتورة لإعادة المسح وتصحيح الخطأ", "${incompleteInvoices.size} awaiting completion")
+                    )
+                }
+                items(incompleteInvoices, key = { "def_${it.invoiceNo}" }) { rec ->
+                    val exceededFreeLimit = rec.deferCount >= 5
+                    Surface(
+                        onClick = { onOpenInvoice(rec.invoiceNo) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("deferred_invoice_${rec.invoiceNo}"),
+                        shape = MaterialTheme.shapes.medium,
+                        color = Amber950.copy(alpha = 0.65f),
+                        border = BorderStroke(1.2.dp, if (exceededFreeLimit) Rose400 else Amber400.copy(alpha = 0.7f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(rec.invoiceNo, style = MonoCodeStyle, color = Amber400)
+                                    Text(
+                                        s.t(
+                                            "ممسوح: ${rec.scannedQty}/${rec.totalRequiredQty} • نواقص: ${rec.missingQty} • أصناف مكتملة: ${rec.completedItemsCount}/${rec.totalItemsCount}",
+                                            "Scanned: ${rec.scannedQty}/${rec.totalRequiredQty} • Missing: ${rec.missingQty} • Exact: ${rec.completedItemsCount}/${rec.totalItemsCount}"
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Slate200
+                                    )
+                                }
+                                StatusPill(s.t("استكمال", "Re-scan"), Emerald400)
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                StatusPill(
+                                    label = if (exceededFreeLimit)
+                                        s.t("ترحيل ${rec.deferCount}/5 (القادم بمشرف)", "Defer ${rec.deferCount}/5 (Supervisor next)")
+                                    else
+                                        s.t("محاولات الترحيل: ${rec.deferCount}/5", "Deferrals: ${rec.deferCount}/5"),
+                                    color = if (exceededFreeLimit) Rose400 else Amber400
+                                )
+                                if (rec.recordShortagesReport) {
+                                    StatusPill(s.t("مسجلة بنواقص", "Shortages Report"), Rose400)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             item(key = "audit_ready_header") {
                 SectionHeaderRow(
                     title = s.t("فواتير جاهزة للتدقيق", "Invoices Ready for Audit"),
@@ -462,11 +526,25 @@ fun ActiveAuditScreen(
             }
             if (availableInvoices.isEmpty()) {
                 item(key = "audit_empty_state") {
-                    EmptyStatePanel(
-                        icon = Icons.Rounded.TaskAlt,
-                        title = s.t("تم إغلاق جميع الفواتير", "All Invoices Closed"),
-                        description = s.t("يمكنك اعتماد تقرير الجلسة الكامل من الأعلى أو استيراد ملف جديد.", "Approve the full session report above or import a new spreadsheet.")
-                    )
+                    if (incompleteInvoices.isEmpty()) {
+                        EmptyStatePanel(
+                            icon = Icons.Rounded.TaskAlt,
+                            title = s.t("تم استكمال وإغلاق جميع الفواتير", "All Invoices Completed & Closed"),
+                            description = s.t(
+                                "أصبحت جميع الفواتير الآن مكتملة — يمكن لحساب المدقق اعتماد وإنهاء الجلسة من الأعلى.",
+                                "All invoices are now completed — the Auditor can approve and close the session above."
+                            )
+                        )
+                    } else {
+                        EmptyStatePanel(
+                            icon = Icons.Rounded.PendingActions,
+                            title = s.t("متبقي فواتير مرحّلة للاستكمال", "Deferred Invoices Remaining"),
+                            description = s.t(
+                                "أعد فتح الفواتير المرحّلة أعلاه لإعادة المسح وتصحيح الأخطاء حتى تصبح جميع الفواتير مكتملة.",
+                                "Re-open deferred invoices above to finish scanning and correct errors until all invoices are completed."
+                            )
+                        )
+                    }
                 }
             } else {
                 items(availableInvoices, key = { "avail_$it" }) { inv ->
@@ -503,16 +581,18 @@ fun ActiveAuditScreen(
             if (completedInvoices.isNotEmpty()) {
                 item(key = "audit_completed_header") {
                     SectionHeaderRow(
-                        title = s.t("الفواتير المكتملة المقفلة", "Completed & Locked Invoices"),
-                        subtitle = s.t("${completedInvoices.size} فاتورة", "${completedInvoices.size} completed")
+                        title = s.t("فواتير مكتملة", "Completed Invoices"),
+                        subtitle = s.t("${completedInvoices.size} فاتورة مكتملة", "${completedInvoices.size} completed")
                     )
                 }
-                items(completedInvoices.take(10), key = { "comp_${it.invoiceNo}" }) { comp ->
+                items(completedInvoices, key = { "comp_${it.invoiceNo}" }) { comp ->
                     Surface(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("completed_invoice_card_${comp.invoiceNo}"),
                         shape = MaterialTheme.shapes.medium,
                         color = Slate900,
-                        border = BorderStroke(1.dp, Slate800)
+                        border = BorderStroke(1.dp, Emerald500.copy(alpha = 0.3f))
                     ) {
                         Row(
                             modifier = Modifier.padding(12.dp),
@@ -520,7 +600,7 @@ fun ActiveAuditScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(comp.invoiceNo, style = MonoCodeStyle, color = Slate200)
+                                Text(comp.invoiceNo, style = MonoCodeStyle, color = Emerald400)
                                 Text("${comp.totalItems} ${s.t("صنف", "items")} • ${comp.totalQty} ${s.t("كمية", "qty")}", style = MaterialTheme.typography.bodySmall, color = Slate400)
                             }
                             OutlinedButton(
@@ -677,29 +757,64 @@ fun ActiveAuditScreen(
                             }
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(
-                                onClick = onSuspendSession,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .testTag("audit_suspend_button")
-                            ) {
-                                Icon(Icons.Rounded.PauseCircle, contentDescription = null, tint = Amber400)
-                                Spacer(Modifier.width(6.dp))
-                                Text(s.t("تعليق الفاتورة", "Hold"), color = Amber400)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            val nextAttempt = activeSession.deferCount + 1
+                            val needsSupervisorNext = activeSession.deferCount >= 5 && settings.requireSupervisorOverride
+                            Text(
+                                text = if (needsSupervisorNext) {
+                                    s.t(
+                                        "تنبيه الترحيل: تم استهلاك 5 محاولات مجانية (المحاولة #$nextAttempt تتطلب رمز المشرف)",
+                                        "Deferral Notice: 5 free attempts used (Attempt #$nextAttempt requires Supervisor PIN)"
+                                    )
+                                } else {
+                                    s.t(
+                                        "الترحيل للاستكمال: المحاولة التالية #$nextAttempt من 5 محاولات قبل طلب رمز المشرف",
+                                        "Defer for Completion: Next is Attempt #$nextAttempt of 5 before Supervisor PIN"
+                                    )
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (needsSupervisorNext) Rose400 else Slate300
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = onSuspendSession,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("audit_defer_button"),
+                                    border = BorderStroke(1.dp, Amber500.copy(alpha = 0.6f))
+                                ) {
+                                    Icon(Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null, tint = Amber400)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(s.t("ترحيل للاستكمال", "Defer"), color = Amber400)
+                                }
+                                Button(
+                                    onClick = onCloseInvoice,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("audit_complete_button"),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
+                                ) {
+                                    Icon(Icons.Rounded.TaskAlt, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(s.t("إغلاق الفاتورة", "Close Invoice"))
+                                }
                             }
-                            Button(
-                                onClick = onCloseInvoice,
+                            OutlinedButton(
+                                onClick = onDeferWithShortages,
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .fillMaxWidth()
                                     .defaultMinSize(minHeight = 48.dp)
-                                    .testTag("audit_complete_button"),
-                                colors = ButtonDefaults.buttonColors(containerColor = Emerald500, contentColor = Slate950)
+                                    .testTag("audit_defer_shortages_button"),
+                                border = BorderStroke(1.dp, Rose500.copy(alpha = 0.6f))
                             ) {
-                                Icon(Icons.Rounded.TaskAlt, contentDescription = null)
+                                Icon(Icons.Rounded.AssignmentLate, contentDescription = null, tint = Rose400)
                                 Spacer(Modifier.width(6.dp))
-                                Text(s.t("إغلاق الفاتورة", "Close Invoice"))
+                                Text(
+                                    s.t("ترحيل مع تسجيل النواقص (تقرير فواتير غير مكتملة)", "Defer w/ Shortages (Incomplete Report)"),
+                                    color = Rose400
+                                )
                             }
                         }
                     }
@@ -836,8 +951,8 @@ private fun TopScanningProgressCounterCard(
                     )
                     Text(
                         text = s.t(
-                            "مكتمل: ${auditKpis.completedInvoices} من ${auditKpis.totalInvoices} فاتورة • المتبقي: ${auditKpis.remainingInvoices}",
-                            "Completed: ${auditKpis.completedInvoices}/${auditKpis.totalInvoices} invoices • Remaining: ${auditKpis.remainingInvoices}"
+                            "مكتمل: ${auditKpis.completedInvoices}/${auditKpis.totalInvoices} • مرحّل: ${auditKpis.deferredInvoices} • المتبقي: ${auditKpis.remainingInvoices}",
+                            "Completed: ${auditKpis.completedInvoices}/${auditKpis.totalInvoices} • Deferred: ${auditKpis.deferredInvoices} • Left: ${auditKpis.remainingInvoices}"
                         ),
                         style = MaterialTheme.typography.bodySmall,
                         color = Slate400

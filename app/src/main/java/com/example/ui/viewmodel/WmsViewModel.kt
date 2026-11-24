@@ -121,7 +121,7 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
 
     val currentRoleConfig: StateFlow<RolePermissionConfig> = currentUser.map {
         ROLE_DEFINITIONS[it.role] ?: ROLE_DEFINITIONS.getValue(UserRole.GUEST)
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, ROLE_DEFINITIONS.getValue(UserRole.AUDITOR))
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, ROLE_DEFINITIONS.getValue(UserRole.SUPERVISOR))
 
     val firebaseUser: StateFlow<FirebaseUser?> = GoogleAuthManager.authStateFlow()
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -163,6 +163,9 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _pendingInvoiceSwitch = MutableStateFlow<PendingInvoiceSwitchConfirmation?>(null)
     val pendingInvoiceSwitch: StateFlow<PendingInvoiceSwitchConfirmation?> = _pendingInvoiceSwitch.asStateFlow()
+
+    private val _pendingSupervisorOverride = MutableStateFlow<PendingSupervisorOverride?>(null)
+    val pendingSupervisorOverride: StateFlow<PendingSupervisorOverride?> = _pendingSupervisorOverride.asStateFlow()
 
     private val _lastPlayedTone = MutableStateFlow<WmsAudioTone?>(null)
     val lastPlayedTone: StateFlow<WmsAudioTone?> = _lastPlayedTone.asStateFlow()
@@ -219,6 +222,7 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         AuditScanningKpis(
             totalInvoices = allInvoiceNos.size,
             completedInvoices = completed.size,
+            deferredInvoices = incomplete.size,
             remainingInvoices = (allInvoiceNos.size - completed.size).coerceAtLeast(0),
             totalRequiredQty = reqSum,
             totalScannedQty = scannedSum,
@@ -239,7 +243,8 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         auditHistory,
         discrepancies,
         dailySnapshots,
-        activeSession
+        activeSession,
+        incompleteInvoices
     ) { values ->
         AuditSessionEngine.buildSessionApprovalSummary(
             master = values[0] as List<MasterInvoiceItem>,
@@ -247,7 +252,8 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             history = values[2] as List<InvoiceAuditHistory>,
             rawDiscrepancies = values[3] as List<AuditDiscrepancy>,
             snapshots = values[4] as List<DailyAuditSnapshot>,
-            activeSession = values[5] as ActiveInvoiceSession?
+            activeSession = values[5] as ActiveInvoiceSession?,
+            incomplete = values[6] as List<IncompleteInvoiceRecord>
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, SessionApprovalSummary())
 
@@ -339,7 +345,20 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectLocalOperator(user: AppUser, pinAttempt: String): Boolean {
-        if (user.pinCode != pinAttempt && pinAttempt != "0000") return false
+        val cleanPin = pinAttempt.trim()
+        val isValid = when (user.role) {
+            UserRole.SUPERVISOR -> {
+                val configuredPin = settings.value.supervisorPinCode
+                if (settings.value.supervisorPinConfigured && configuredPin.isNotBlank()) {
+                    cleanPin == configuredPin || cleanPin == user.pinCode
+                } else {
+                    cleanPin == user.pinCode
+                }
+            }
+            UserRole.GUEST -> cleanPin == user.pinCode || cleanPin == "0000"
+            else -> cleanPin == user.pinCode
+        }
+        if (!isValid) return false
         viewModelScope.launch {
             val s = settings.value
             val updatedSettings = s.copy(
@@ -353,6 +372,80 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         return true
+    }
+
+    fun configureSupervisorPin(newPin: String): Boolean {
+        val cleanPin = newPin.trim()
+        if (cleanPin.length < 4) return false
+        viewModelScope.launch {
+            val s = settings.value
+            repository.saveSettings(
+                s.copy(
+                    supervisorPinConfigured = true,
+                    supervisorPinCode = cleanPin
+                )
+            )
+            val supUsers = appUsers.value.filter { it.role == UserRole.SUPERVISOR }
+            supUsers.forEach { sup ->
+                repository.upsertAppUser(sup.copy(pinCode = cleanPin))
+            }
+            _statusMessage.value = "تم تعيين وحفظ رمز المشرف بنجاح"
+        }
+        return true
+    }
+
+    fun switchToTrialAuditor() {
+        val trialAuditor = appUsers.value.firstOrNull { it.role == UserRole.AUDITOR }
+            ?: SeedData.defaultDemoUsers.first { it.role == UserRole.AUDITOR }
+        viewModelScope.launch {
+            val s = settings.value
+            val updatedSettings = s.copy(
+                auditorName = trialAuditor.name,
+                auditorId = trialAuditor.jobId,
+                auditorTitle = trialAuditor.title ?: "مدقق رقابي تجريبي"
+            )
+            repository.switchCurrentUser(
+                trialAuditor.copy(lastLoginAt = Instant.now().toString()),
+                updatedSettings
+            )
+            _statusMessage.value = "تم التبديل إلى حساب المدقق التجريبي الافتراضي: ${trialAuditor.name}"
+        }
+    }
+
+    fun isValidSupervisorPin(pinAttempt: String): Boolean {
+        val clean = pinAttempt.trim()
+        if (clean.isBlank()) return false
+        val s = settings.value
+        if (s.supervisorPinConfigured && s.supervisorPinCode.isNotBlank() && clean == s.supervisorPinCode) {
+            return true
+        }
+        return appUsers.value.any { it.role == UserRole.SUPERVISOR && it.pinCode == clean }
+    }
+
+    fun authorizeSupervisorOverride(pinAttempt: String): Boolean {
+        val pending = _pendingSupervisorOverride.value ?: return false
+        if (!isValidSupervisorPin(pinAttempt)) return false
+        _pendingSupervisorOverride.value = null
+        playTone(WmsAudioTone.INVOICE_REOPENED)
+        when (pending.actionType) {
+            SupervisorOverrideActionType.DEFER_BEYOND_LIMIT -> {
+                deferCurrentInvoiceForCompletion(
+                    recordShortages = pending.recordShortages,
+                    supervisorOverrideGranted = true
+                )
+            }
+            SupervisorOverrideActionType.REOPEN_COMPLETED_INVOICE -> {
+                reopenCompletedInvoice(
+                    invoiceNo = pending.invoiceNo,
+                    supervisorOverrideGranted = true
+                )
+            }
+        }
+        return true
+    }
+
+    fun dismissSupervisorOverride() {
+        _pendingSupervisorOverride.value = null
     }
 
     fun addLocalOperator(name: String, jobId: String, role: UserRole, pinCode: String) {
@@ -500,8 +593,8 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
                     "Closed ${currentOpenSession.invoiceNo} & opened ${targetSession.invoiceNo} (${targetSession.items.size} items)"
                 )
                 incomplete != null -> ScanFeedbackBanner.Success(
-                    "تم استئناف الفاتورة المعلقة ${targetSession.invoiceNo}",
-                    "Resumed incomplete invoice ${targetSession.invoiceNo}"
+                    "تم فتح الفاتورة المرحّلة للاستكمال ${targetSession.invoiceNo} (ترحيل #${incomplete.deferCount})",
+                    "Opened deferred invoice ${targetSession.invoiceNo} (deferral #${incomplete.deferCount})"
                 )
                 else -> ScanFeedbackBanner.Success(
                     "تم فتح الفاتورة ${targetSession.invoiceNo} وقفلها على عناصرها (${targetSession.items.size} أصناف) — يُمنع أي باركود خارجي",
@@ -689,26 +782,47 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun suspendCurrentSessionToIncomplete() {
+        deferCurrentInvoiceForCompletion(recordShortages = false)
+    }
+
+    fun deferCurrentInvoiceForCompletion(
+        recordShortages: Boolean = false,
+        supervisorOverrideGranted: Boolean = false
+    ) {
         synchronized(auditStateLock) {
             val session = _activeSession.value ?: return
-            val items = session.items.values
-            val completedCount = items.count { it.qtyStatus == QtyStatus.EXACT && it.codeStatus == CodeStatus.MATCH }
-            val totalReq = items.sumOf { it.requiredQty }
-            val scannedQty = items.sumOf { it.actualQty }
-            val missingQty = (totalReq - scannedQty).coerceAtLeast(0)
+            val user = currentUser.value
+            val s = settings.value
+            if (!supervisorOverrideGranted && AuditSessionEngine.requiresSupervisorForDefer(
+                    currentDeferCount = session.deferCount,
+                    userRole = user.role,
+                    requireSupervisorOverride = s.requireSupervisorOverride
+                )
+            ) {
+                val nextAttempt = session.deferCount + 1
+                playTone(WmsAudioTone.INVOICE_LOCKED)
+                val msgAr = "تم تجاوز المحاولات الخمس للترحيل (محاولة #$nextAttempt للفاتورة ${session.invoiceNo}). يلزم تمرير المشرف بإدخال رمزه."
+                val msgEn = "Max 5 deferral attempts exceeded (Attempt #$nextAttempt for ${session.invoiceNo}). Supervisor PIN override required."
+                _pendingSupervisorOverride.value = PendingSupervisorOverride(
+                    actionType = SupervisorOverrideActionType.DEFER_BEYOND_LIMIT,
+                    invoiceNo = session.invoiceNo,
+                    recordShortages = recordShortages,
+                    attemptNumber = nextAttempt,
+                    titleAr = "تمرير صلاحيات المشرف للترحيل",
+                    titleEn = "Supervisor Deferral Override",
+                    messageAr = msgAr,
+                    messageEn = msgEn
+                )
+                _scanBanner.value = ScanFeedbackBanner.Warning(msgAr, msgEn)
+                _statusMessage.value = msgAr
+                return
+            }
 
-            val record = IncompleteInvoiceRecord(
-                invoiceNo = session.invoiceNo,
-                orderNo = session.orderNo,
-                auditorName = currentUser.value.name,
-                auditorId = currentUser.value.jobId,
-                savedAt = Instant.now().toString(),
+            val record = AuditSessionEngine.buildDeferredInvoiceRecord(
                 session = session,
-                completedItemsCount = completedCount,
-                totalItemsCount = items.size,
-                missingQty = missingQty,
-                scannedQty = scannedQty,
-                totalRequiredQty = totalReq
+                auditorName = user.name,
+                auditorId = user.jobId,
+                recordShortagesReport = recordShortages
             )
             activeSessionMutatedLocally = true
             _activeSession.value = null
@@ -717,8 +831,12 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             _pendingInvoiceSwitch.value = null
             persistenceQueue.trySend {
                 repository.suspendSession(record)
-                playTone(WmsAudioTone.INVOICE_LOCKED)
-                _statusMessage.value = "تم حفظ الفاتورة ${session.invoiceNo} كمعلقة للاستئناف لاحقاً"
+                playTone(if (recordShortages) WmsAudioTone.SURPLUS_WARNING else WmsAudioTone.INVOICE_LOCKED)
+                _statusMessage.value = if (recordShortages) {
+                    "تم ترحيل الفاتورة ${session.invoiceNo} مع تسجيل النواقص ضمن تقرير فواتير غير مكتملة (محاولة #${record.deferCount})"
+                } else {
+                    "تم ترحيل الفاتورة ${session.invoiceNo} للاستكمال وإعادة المسح (محاولة #${record.deferCount})"
+                }
             }
         }
     }
@@ -735,7 +853,11 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
 
             val allMasterInvoices = masterItems.value.map { it.invoiceNo }.distinct()
             val nextClosedSet = (completedInvoices.value.map { it.invoiceNo } + session.invoiceNo).toSet()
+            val remainingDeferred = incompleteInvoices.value.filterNot {
+                it.invoiceNo.equals(session.invoiceNo, ignoreCase = true)
+            }
             val allDatabaseInvoicesFinished = allMasterInvoices.isNotEmpty() &&
+                remainingDeferred.isEmpty() &&
                 allMasterInvoices.all { inv -> nextClosedSet.any { it.equals(inv, ignoreCase = true) } }
 
             activeSessionMutatedLocally = true
@@ -756,18 +878,33 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 if (allDatabaseInvoicesFinished) {
                     playTone(WmsAudioTone.SESSION_COMPLETED_FANFARE)
-                    _statusMessage.value = "تم إغلاق الفاتورة ${session.invoiceNo} وإنهاء جميع فواتير الجلسة — التقرير جاهز للاعتماد الشامل"
+                    _statusMessage.value = "اكتملت جميع الفواتير — التقرير جاهز لاعتماد وإنهاء الجلسة من حساب المدقق"
                 } else {
                     playTone(WmsAudioTone.INVOICE_FINISHED)
-                    _statusMessage.value = "تم إغلاق الفاتورة ${session.invoiceNo} (الاعتماد يتم لكامل التقرير بعد إنهاء جميع الفواتير)"
+                    _statusMessage.value = "تم إغلاق الفاتورة ${session.invoiceNo} (الاعتماد النهائي بعد استكمال جميع الفواتير)"
                 }
             }
         }
     }
 
-    fun reopenCompletedInvoice(invoiceNo: String) {
-        if (!currentRoleConfig.value.canReopenDocuments) {
-            _statusMessage.value = "صلاحية مشرف أو مدقق مطلوبة لإعادة فتح الفاتورة"
+    fun reopenCompletedInvoice(
+        invoiceNo: String,
+        supervisorOverrideGranted: Boolean = false
+    ) {
+        val s = settings.value
+        if (!supervisorOverrideGranted && s.requireSupervisorOverride && !currentRoleConfig.value.canReopenDocuments) {
+            playTone(WmsAudioTone.INVOICE_LOCKED)
+            val msgAr = "إعادة فتح الفاتورة المكتملة ($invoiceNo) تتطلب تمرير صلاحيات المشرف بإدخال رمزه."
+            val msgEn = "Reopening completed invoice ($invoiceNo) requires Supervisor PIN override."
+            _pendingSupervisorOverride.value = PendingSupervisorOverride(
+                actionType = SupervisorOverrideActionType.REOPEN_COMPLETED_INVOICE,
+                invoiceNo = invoiceNo,
+                titleAr = "تمرير المشرف لإعادة الفتح",
+                titleEn = "Supervisor Reopen Override",
+                messageAr = msgAr,
+                messageEn = msgEn
+            )
+            _statusMessage.value = msgAr
             return
         }
         viewModelScope.launch {
@@ -779,7 +916,12 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun approveFullSessionReport(signatureBase64: String? = null, notes: String? = null): DailyAuditSnapshot {
+    fun approveFullSessionReport(signatureBase64: String? = null, notes: String? = null): DailyAuditSnapshot? {
+        if (!currentRoleConfig.value.canApproveSession) {
+            playTone(WmsAudioTone.BLOCKED_COMPLETED)
+            _statusMessage.value = "إنهاء واعتماد الجلسة متاح لحساب المدقق فقط وليس المشرف — يرجى التبديل لحساب المدقق"
+            return null
+        }
         val today = LocalDate.now().toString()
         val summary = sessionApprovalSummary.value
         val master = masterItems.value
@@ -808,7 +950,7 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             exactInvoicesCount = summary.exactInvoicesCount,
             discrepancyInvoicesCount = summary.discrepancyInvoicesCount,
             invoiceDetails = summary.invoiceDetails,
-            notes = notes ?: "اعتماد كامل تقرير جلسة التدقيق (${summary.auditedInvoicesCount} فاتورة • الدقة ${summary.matchAccuracyPercent}%)"
+            notes = notes ?: "اعتماد وإنهاء الجلسة من المدقق ${user.name} (${summary.auditedInvoicesCount} فاتورة • الدقة ${summary.matchAccuracyPercent}%)"
         )
 
         _showSessionApprovalModal.value = false
@@ -818,7 +960,7 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
             }
             repository.upsertDailySnapshot(snapshot)
             playTone(WmsAudioTone.EXACT_COMPLETE)
-            _statusMessage.value = "تم اعتماد وتوقيع كامل تقرير الجلسة (${snapshot.completedInvoices} فاتورة • فروقات: ${snapshot.totalDiscrepancies})"
+            _statusMessage.value = "تم اعتماد وإنهاء الجلسة بواسطة المدقق ${user.name} (${snapshot.completedInvoices} فاتورة)"
         }
         return snapshot
     }
@@ -1393,6 +1535,25 @@ class WmsViewModel(application: Application) : AndroidViewModel(application) {
                 isRtl = s.language == "ar"
             ).onFailure {
                 _statusMessage.value = "تعذر تصدير ملف PDF: ${it.message}"
+            }
+        }
+    }
+
+    fun exportIncompleteInvoicesPdf() {
+        val s = settings.value
+        val records = incompleteInvoices.value.filter { it.recordShortagesReport }
+        if (records.isEmpty()) {
+            _statusMessage.value = "لا توجد فواتير مرحّلة مع تسجيل النواقص لتصدير تقرير فواتير غير مكتملة"
+            return
+        }
+        viewModelScope.launch {
+            repository.exportIncompleteInvoicesPdf(
+                auditorName = s.auditorName,
+                auditorId = s.auditorId,
+                records = records,
+                isRtl = s.language == "ar"
+            ).onFailure {
+                _statusMessage.value = "تعذر تصدير تقرير فواتير غير مكتملة PDF: ${it.message}"
             }
         }
     }

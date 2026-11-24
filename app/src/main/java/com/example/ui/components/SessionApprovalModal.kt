@@ -28,12 +28,15 @@ import com.example.ui.theme.*
 fun FullSessionApprovalDialog(
     isRtl: Boolean,
     auditorName: String,
+    currentUser: AppUser,
     summary: SessionApprovalSummary,
     onDismiss: () -> Unit,
     onApproveWithSignature: (String) -> Unit,
+    onSwitchToTrialAuditor: () -> Unit = {},
     onExportPdf: () -> Unit
 ) {
     val s = WmsStrings(isRtl)
+    val isAuditor = currentUser.role == UserRole.AUDITOR
     var showDetails by remember { mutableStateOf(false) }
     var onlyErrorInvoices by remember { mutableStateOf(false) }
     var showSignatureModal by remember { mutableStateOf(false) }
@@ -43,7 +46,7 @@ fun FullSessionApprovalDialog(
         else summary.invoiceDetails
     }
 
-    if (showSignatureModal) {
+    if (showSignatureModal && isAuditor) {
         AuditorSignatureModal(
             isRtl = isRtl,
             auditorName = auditorName,
@@ -103,8 +106,8 @@ fun FullSessionApprovalDialog(
                                 )
                                 Text(
                                     text = s.t(
-                                        "المدقق: $auditorName • ${summary.auditedInvoicesCount} من ${summary.totalMasterInvoices} فاتورة",
-                                        "Auditor: $auditorName • ${summary.auditedInvoicesCount}/${summary.totalMasterInvoices} invoices"
+                                        "المستخدم الحالي: ${currentUser.name} • ${summary.auditedInvoicesCount} من ${summary.totalMasterInvoices} فاتورة",
+                                        "Active User: ${currentUser.name} • ${summary.auditedInvoicesCount}/${summary.totalMasterInvoices} invoices"
                                     ),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Slate400
@@ -128,6 +131,93 @@ fun FullSessionApprovalDialog(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    // Auditor-only closure notice
+                    if (!isAuditor) {
+                        item(key = "auditor_only_warning") {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("approval_auditor_only_banner"),
+                                shape = MaterialTheme.shapes.large,
+                                color = Amber950,
+                                border = BorderStroke(1.5.dp, Amber400.copy(alpha = 0.7f))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.Policy, contentDescription = null, tint = Amber400)
+                                        Text(
+                                            text = s.t(
+                                                "صلاحية إنهاء واعتماد الجلسة محصورة في حساب المدقق فقط",
+                                                "Session Closure Reserved for Auditor Only"
+                                            ),
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = Amber400,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Text(
+                                        text = s.t(
+                                            "أنت تعمل حالياً بصلاحية (${ROLE_DEFINITIONS[currentUser.role]?.labelAr ?: currentUser.role.name}). لا يمكن للمشرف إنهاء الجلسة؛ يرجى التبديل إلى حساب المدقق التجريبي لاعتماد وتوقيع التقرير النهائي.",
+                                            "You are currently signed in as ${ROLE_DEFINITIONS[currentUser.role]?.labelEn ?: currentUser.role.name}. Supervisors cannot close sessions; switch to the Trial Auditor account to approve and sign."
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Slate100
+                                    )
+                                    Button(
+                                        onClick = onSwitchToTrialAuditor,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .defaultMinSize(minHeight = 48.dp)
+                                            .testTag("approval_switch_to_auditor_button"),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Amber500, contentColor = Slate950)
+                                    ) {
+                                        Icon(Icons.Rounded.SwitchAccount, contentDescription = null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            s.t("التبديل إلى حساب المدقق التجريبي الآن", "Switch to Trial Auditor Now"),
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Deferred invoices still pending completion notice
+                    if (summary.deferredInvoicesCount > 0) {
+                        item(key = "deferred_pending_warning") {
+                            Surface(
+                                shape = MaterialTheme.shapes.medium,
+                                color = Slate900,
+                                border = BorderStroke(1.dp, Amber500.copy(alpha = 0.5f))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(Icons.Rounded.PendingActions, contentDescription = null, tint = Amber400)
+                                    Text(
+                                        text = s.t(
+                                            "يوجد ${summary.deferredInvoicesCount} فاتورة مرحّلة للاستكمال (${summary.incompleteShortageInvoicesCount} منها بتقرير نواقص). استكملها لتصبح جميع الفواتير مكتملة.",
+                                            "${summary.deferredInvoicesCount} invoice(s) still deferred for completion (${summary.incompleteShortageInvoicesCount} with shortages report)."
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Amber400
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     // Status Pill & Accuracy Bar
                     item(key = "session_status_overview") {
                         Surface(
@@ -153,7 +243,8 @@ fun FullSessionApprovalDialog(
                                     StatusPill(
                                         label = when {
                                             summary.isSessionApproved -> s.t("تم اعتماد كامل التقرير", "Report Approved")
-                                            summary.isAllMasterInvoicesFinished -> s.t("جاهز للاعتماد النهائي", "Ready for Approval")
+                                            summary.isAllMasterInvoicesFinished -> s.t("كل الفواتير مكتملة — جاهز للاعتماد", "All Completed — Ready")
+                                            summary.deferredInvoicesCount > 0 -> s.t("مرحّلة للاستكمال: ${summary.deferredInvoicesCount}", "Deferred: ${summary.deferredInvoicesCount}")
                                             else -> s.t("تقرير مرحلي (${summary.remainingInvoicesCount} متبقي)", "In Progress (${summary.remainingInvoicesCount} left)")
                                         },
                                         color = when {
@@ -190,9 +281,9 @@ fun FullSessionApprovalDialog(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 ApprovalMetricTile(
-                                    label = s.t("الفواتير المغلقة", "Audited Invoices"),
+                                    label = s.t("الفواتير المكتملة", "Completed Invoices"),
                                     value = "${summary.auditedInvoicesCount}/${summary.totalMasterInvoices}",
-                                    sub = "${s.t("مطابقة:", "Exact:")} ${summary.exactInvoicesCount} • ${s.t("بفروقات:", "Errors:")} ${summary.discrepancyInvoicesCount}",
+                                    sub = "${s.t("مطابقة:", "Exact:")} ${summary.exactInvoicesCount} • ${s.t("مرحّلة:", "Deferred:")} ${summary.deferredInvoicesCount}",
                                     accent = Emerald400,
                                     modifier = Modifier
                                         .weight(1f)
@@ -444,22 +535,26 @@ fun FullSessionApprovalDialog(
                         }
                         Button(
                             onClick = { showSignatureModal = true },
+                            enabled = isAuditor,
                             modifier = Modifier
                                 .weight(1f)
                                 .defaultMinSize(minHeight = 48.dp)
                                 .testTag("approve_full_session_button"),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Emerald500,
-                                contentColor = Slate950
+                                contentColor = Slate950,
+                                disabledContainerColor = Slate800,
+                                disabledContentColor = Slate400
                             )
                         ) {
                             Icon(Icons.Rounded.Draw, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                if (summary.isSessionApproved)
-                                    s.t("إعادة توقيع واعتماد التقرير", "Re-sign & Approve Report")
-                                else
-                                    s.t("اعتماد وتوقيع كامل التقرير", "Sign & Approve Full Report")
+                                when {
+                                    !isAuditor -> s.t("متاح للمدقق فقط", "Auditor Only")
+                                    summary.isSessionApproved -> s.t("إعادة توقيع واعتماد التقرير", "Re-sign & Approve Report")
+                                    else -> s.t("اعتماد وإنهاء الجلسة (المدقق)", "Sign & Close Session (Auditor)")
+                                }
                             )
                         }
                     }

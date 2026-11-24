@@ -42,8 +42,14 @@ abstract class AppDatabase : RoomDatabase() {
         if (dao.getWorkerCount() == 0) {
             dao.upsertWorkers(SeedData.defaultWorkers.map { WorkerEntity.fromDomain(it) })
         }
-        if (dao.getAppUserCount() == 0) {
+        val existingUsers = dao.getAllAppUsers().map { it.toDomain() }
+        if (existingUsers.isEmpty()) {
             dao.upsertAppUsers(SeedData.defaultDemoUsers.map { AppUserEntity.fromDomain(it) })
+        } else if (existingUsers.any { it.id == "usr-auditor-1" && it.jobId == "AUD-101" }) {
+            val migrated = SeedData.defaultDemoUsers
+                .filter { it.id == "usr-sup-1" || it.id == "usr-auditor-1" }
+                .map { AppUserEntity.fromDomain(it) }
+            dao.upsertAppUsers(migrated)
         }
         if (dao.getAllMasterItems().isEmpty()) {
             dao.insertMasterItems(SeedData.defaultDemoMasterItems.map { MasterItemEntity.fromDomain(it) })

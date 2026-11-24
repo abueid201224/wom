@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.model.*
 import com.example.ui.WmsStrings
@@ -27,8 +28,11 @@ fun ErrorReportScreen(
     discrepancies: List<AuditDiscrepancy>,
     wrongPicks: List<WrongPickingRecord>,
     auditHistory: List<InvoiceAuditHistory>,
+    incompleteInvoices: List<IncompleteInvoiceRecord> = emptyList(),
     sessionSummary: SessionApprovalSummary = SessionApprovalSummary(),
     onOpenSessionApproval: () -> Unit = {},
+    onOpenDeferredInvoice: (String) -> Unit = {},
+    onExportIncompletePdf: () -> Unit = {},
     onExportCsv: () -> Unit,
     onExportPdf: () -> Unit,
     onDeleteDiscrepancy: (Long) -> Unit,
@@ -36,6 +40,9 @@ fun ErrorReportScreen(
 ) {
     val s = WmsStrings(isRtl)
     var selectedTab by remember { mutableIntStateOf(0) }
+    val shortageFlaggedIncomplete = remember(incompleteInvoices) {
+        incompleteInvoices.filter { it.recordShortagesReport }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -98,6 +105,10 @@ fun ErrorReportScreen(
                             color = Emerald400
                         )
                         StatusPill(
+                            label = s.t("مرحّلة: ${sessionSummary.deferredInvoicesCount}", "Deferred: ${sessionSummary.deferredInvoicesCount}"),
+                            color = if (sessionSummary.deferredInvoicesCount == 0) Emerald400 else Amber400
+                        )
+                        StatusPill(
                             label = s.t("عجز: -${sessionSummary.totalShortageQty}", "Short: -${sessionSummary.totalShortageQty}"),
                             color = if (sessionSummary.totalShortageQty == 0) Emerald400 else Rose400
                         )
@@ -120,7 +131,7 @@ fun ErrorReportScreen(
                             if (sessionSummary.isSessionApproved)
                                 s.t("عرض التقرير المعتمد والتفاصيل", "View Approved Report & Details")
                             else
-                                s.t("عرض التفاصيل واعتماد كامل التقرير", "View Details & Approve Full Report")
+                                s.t("عرض التفاصيل واعتماد الجلسة (للمدقق)", "View Details & Approve (Auditor)")
                         )
                     }
                 }
@@ -140,11 +151,13 @@ fun ErrorReportScreen(
                     modifier = Modifier.weight(1f)
                 )
                 WmsKpiCard(
-                    title = s.t("تجميع خاطئ", "Wrong Picks"),
-                    value = wrongPicks.size.toString(),
-                    icon = Icons.Rounded.SwapHoriz,
+                    title = s.t("فواتير غير مكتملة", "Incomplete"),
+                    value = shortageFlaggedIncomplete.size.toString(),
+                    subtitle = s.t("مرحّلة مع النواقص", "deferred w/ shortages"),
+                    icon = Icons.Rounded.PendingActions,
                     accentColor = Amber400,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    onClick = { selectedTab = 3 }
                 )
             }
         }
@@ -198,17 +211,26 @@ fun ErrorReportScreen(
                 FilterChip(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
+                    modifier = Modifier.testTag("reports_tab_discrepancies"),
                     label = { Text("${s.t("الفروقات", "Discrepancies")} (${discrepancies.size})") }
                 )
                 FilterChip(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
+                    modifier = Modifier.testTag("reports_tab_wrong_picks"),
                     label = { Text("${s.t("التجميع الخاطئ", "Wrong Picks")} (${wrongPicks.size})") }
                 )
                 FilterChip(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
+                    modifier = Modifier.testTag("reports_tab_history"),
                     label = { Text("${s.t("السجل", "History")} (${auditHistory.size})") }
+                )
+                FilterChip(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    modifier = Modifier.testTag("reports_tab_incomplete_invoices"),
+                    label = { Text("${s.t("فواتير غير مكتملة", "Incomplete Invoices")} (${shortageFlaggedIncomplete.size})") }
                 )
             }
         }
@@ -296,7 +318,7 @@ fun ErrorReportScreen(
                     }
                 }
             }
-            else -> {
+            2 -> {
                 if (auditHistory.isEmpty()) {
                     item(key = "reports_empty_history") {
                         EmptyStatePanel(
@@ -325,6 +347,144 @@ fun ErrorReportScreen(
                                     Text("${h.totalScannedQty}/${h.totalRequiredQty} • ${s.t("فروقات:", "Disc:")} ${h.discrepancyCount}", style = MonoCodeStyle, color = Slate300)
                                 }
                                 StatusPill(h.status, color)
+                            }
+                        }
+                    }
+                }
+            }
+            else -> {
+                item(key = "reports_incomplete_header") {
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = Amber950,
+                        border = BorderStroke(1.dp, Amber500.copy(alpha = 0.45f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        s.t("تقرير فواتير غير مكتملة", "Incomplete Invoices Report"),
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = Amber400,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        s.t(
+                                            "الفواتير المرحّلة مع تسجيل النواقص لإعادة المسح واستكمالها",
+                                            "Invoices deferred with recorded shortages awaiting re-scan"
+                                        ),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Slate200
+                                    )
+                                }
+                                StatusPill("${shortageFlaggedIncomplete.size}", Amber400)
+                            }
+                            if (shortageFlaggedIncomplete.isNotEmpty()) {
+                                Button(
+                                    onClick = onExportIncompletePdf,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("reports_export_incomplete_pdf_button"),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Amber500, contentColor = Slate950)
+                                ) {
+                                    Icon(Icons.Rounded.PictureAsPdf, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        s.t("تصدير تقرير فواتير غير مكتملة PDF", "Export Incomplete Invoices PDF"),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (shortageFlaggedIncomplete.isEmpty()) {
+                    item(key = "reports_empty_incomplete") {
+                        EmptyStatePanel(
+                            icon = Icons.Rounded.TaskAlt,
+                            title = s.t("لا توجد فواتير غير مكتملة مسجلة", "No Incomplete Invoices Recorded"),
+                            description = s.t(
+                                "عند اختيار «ترحيل مع تسجيل النواقص» من شاشة التدقيق ستظهر الفاتورة ونواقصها هنا وتُزال تلقائياً فور استكمالها.",
+                                "When you select 'Defer w/ Shortages' during audit, the invoice and its missing items appear here until completed."
+                            )
+                        )
+                    }
+                } else {
+                    items(shortageFlaggedIncomplete, key = { "inc_${it.invoiceNo}" }) { rec ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("incomplete_report_card_${rec.invoiceNo}"),
+                            shape = MaterialTheme.shapes.medium,
+                            color = Slate900,
+                            border = BorderStroke(1.dp, Rose500.copy(alpha = 0.45f))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("${rec.invoiceNo} • ${rec.auditorName ?: "-"}", style = MonoCodeStyle, color = Amber400)
+                                        Text(
+                                            s.t(
+                                                "ممسوح: ${rec.scannedQty}/${rec.totalRequiredQty} • نواقص: ${rec.missingQty} قطعة • محاولة ${rec.deferCount}/5",
+                                                "Scanned: ${rec.scannedQty}/${rec.totalRequiredQty} • Missing: ${rec.missingQty} pcs • Attempt ${rec.deferCount}/5"
+                                            ),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Slate300
+                                        )
+                                    }
+                                    StatusPill(s.t("غير مكتملة", "Incomplete"), Rose400)
+                                }
+                                if (rec.shortageItemsSnapshot.isNotEmpty()) {
+                                    HorizontalDivider(color = Slate800)
+                                    rec.shortageItemsSnapshot.forEach { sh ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "${sh.itemCode} • ${sh.itemName}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = Slate200,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                "${sh.actualQty}/${sh.requiredQty} (${sh.difference})",
+                                                style = MonoCodeStyle,
+                                                color = Rose400
+                                            )
+                                        }
+                                    }
+                                }
+                                OutlinedButton(
+                                    onClick = { onOpenDeferredInvoice(rec.invoiceNo) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .testTag("incomplete_reopen_for_completion_${rec.invoiceNo}")
+                                ) {
+                                    Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, tint = Emerald400)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(s.t("فتح لإعادة المسح والاستكمال", "Open to Re-Scan & Complete"), color = Emerald400)
+                                }
                             }
                         }
                     }

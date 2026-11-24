@@ -40,7 +40,7 @@ class PreferencesManager(private val context: Context) {
     }
 
     val currentUserIdFlow: Flow<String> = context.wmsDataStore.data.map { prefs ->
-        prefs[keyCurrentUserId] ?: "usr-auditor-1"
+        prefs[keyCurrentUserId] ?: "usr-sup-1"
     }
 
     suspend fun saveSettings(settings: AppSettings) {

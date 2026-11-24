@@ -6,6 +6,8 @@ import com.example.WmsApplication
 import com.example.model.CodeStatus
 import com.example.model.QtyStatus
 import com.example.model.ReturnItemCondition
+import com.example.model.SupervisorOverrideActionType
+import com.example.model.UserRole
 import com.example.services.WmsAudioTone
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,13 +52,15 @@ class WmsViewModelRobolectricTest {
             dao.clearDailySnapshots()
             app.preferencesManager.saveActiveSession(null)
             app.preferencesManager.saveSettings(com.example.model.AppSettings())
+            app.preferencesManager.setCurrentUserId("usr-sup-1")
         }
         viewModel = WmsViewModel(app)
         waitUntil {
             viewModel.masterItems.value.isNotEmpty() &&
                 viewModel.packagingRules.value.isNotEmpty() &&
                 viewModel.completedInvoices.value.isEmpty() &&
-                viewModel.activeSession.value == null
+                viewModel.activeSession.value == null &&
+                viewModel.currentUser.value.id == "usr-sup-1"
         }
     }
 
@@ -276,15 +280,23 @@ class WmsViewModelRobolectricTest {
         assertEquals(2, summary.discrepancyDetails.size)
         assertFalse(summary.isSessionApproved)
 
-        // 4. Approve and sign the entire session report once
+        // 4. Supervisor CANNOT approve/end session; must switch to Auditor first
+        assertEquals(UserRole.SUPERVISOR, viewModel.currentUser.value.role)
+        assertNull(viewModel.approveFullSessionReport(signatureBase64 = "data:image/png;base64,SUP_TRY"))
+
+        viewModel.switchToTrialAuditor()
+        waitUntil { viewModel.currentUser.value.role == UserRole.AUDITOR }
+
+        // 5. Approve and sign the entire session report once as Trial Auditor
         val approved = viewModel.approveFullSessionReport(signatureBase64 = "data:image/png;base64,FULLSIG")
+        assertNotNull(approved)
         waitUntil {
             !viewModel.showSessionApprovalModal.value &&
-                viewModel.dailySnapshots.value.any { it.id == approved.id } &&
+                viewModel.dailySnapshots.value.any { it.id == approved!!.id } &&
                 viewModel.sessionApprovalSummary.value.isSessionApproved
         }
 
-        val savedSnapshot = viewModel.dailySnapshots.value.first { it.id == approved.id }
+        val savedSnapshot = viewModel.dailySnapshots.value.first { it.id == approved!!.id }
         assertEquals("data:image/png;base64,FULLSIG", savedSnapshot.auditorSignature)
         assertEquals(3, savedSnapshot.completedInvoices)
         assertEquals(38, savedSnapshot.totalScannedQty)
@@ -436,5 +448,93 @@ class WmsViewModelRobolectricTest {
                 WmsAudioTone.SESSION_COMPLETED_FANFARE
             )
         ))
+    }
+
+    @Test
+    fun supervisorPinSetup_deferFiveFreeThenOverride_shortagesReport_andTrialBypass_workCleanly() {
+        // 1. Default account is Supervisor without configured PIN on launch
+        assertEquals(UserRole.SUPERVISOR, viewModel.currentUser.value.role)
+        assertFalse(viewModel.settings.value.supervisorPinConfigured)
+        assertTrue(viewModel.configureSupervisorPin("7788"))
+        waitUntil {
+            viewModel.settings.value.supervisorPinConfigured &&
+                viewModel.settings.value.supervisorPinCode == "7788"
+        }
+
+        // 2. Switch to Default Trial Auditor account
+        viewModel.switchToTrialAuditor()
+        waitUntil {
+            viewModel.currentUser.value.role == UserRole.AUDITOR &&
+                viewModel.currentUser.value.jobId == "AUD-TRIAL"
+        }
+
+        // 3. Open 20450101, scan partially (114110055 x 2), defer 5 times freely without Supervisor PIN
+        assertTrue(viewModel.startOrOpenInvoice("20450101"))
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450101" }
+        viewModel.processAuditScan("114110055", qtyMultiplier = 2, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.items?.get("114110055")?.actualQty == 2 }
+
+        for (attempt in 1..5) {
+            viewModel.deferCurrentInvoiceForCompletion(recordShortages = false)
+            waitUntil {
+                viewModel.activeSession.value == null &&
+                    viewModel.incompleteInvoices.value.firstOrNull { it.invoiceNo == "20450101" }?.deferCount == attempt
+            }
+            assertNull(viewModel.pendingSupervisorOverride.value)
+            assertTrue(viewModel.startOrOpenInvoice("20450101"))
+            waitUntil { viewModel.activeSession.value?.invoiceNo == "20450101" }
+        }
+
+        // 4. 6th deferral attempt (with recorded shortages) triggers Supervisor PIN prompt
+        viewModel.deferCurrentInvoiceForCompletion(recordShortages = true)
+        val pending = viewModel.pendingSupervisorOverride.value
+        assertNotNull(pending)
+        assertEquals(SupervisorOverrideActionType.DEFER_BEYOND_LIMIT, pending!!.actionType)
+        assertEquals(6, pending.attemptNumber)
+        assertTrue(pending.recordShortages)
+        assertNotNull(viewModel.activeSession.value)
+
+        // Wrong PIN rejected, valid Supervisor PIN "7788" authorizes deferral #6 with shortage snapshot
+        assertFalse(viewModel.authorizeSupervisorOverride("0000"))
+        assertNotNull(viewModel.pendingSupervisorOverride.value)
+
+        assertTrue(viewModel.authorizeSupervisorOverride("7788"))
+        waitUntil {
+            viewModel.pendingSupervisorOverride.value == null &&
+                viewModel.activeSession.value == null &&
+                viewModel.incompleteInvoices.value.firstOrNull { it.invoiceNo == "20450101" }?.deferCount == 6
+        }
+        val incRec = viewModel.incompleteInvoices.value.first { it.invoiceNo == "20450101" }
+        assertTrue(incRec.recordShortagesReport)
+        assertEquals(18, incRec.missingQty)
+        assertEquals(3, incRec.shortageItemsSnapshot.size)
+
+        // 5. Finish deferred invoice 20450101 + remaining invoices -> becomes completed & clears deferred list
+        assertTrue(viewModel.startOrOpenInvoice("20450101"))
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450101" }
+        viewModel.processAuditScan("114110055", qtyMultiplier = 2, bypassDebounce = true)
+        viewModel.processAuditScan("511107200", qtyMultiplier = 10, bypassDebounce = true)
+        viewModel.processAuditScan("310044112", qtyMultiplier = 6, bypassDebounce = true)
+        waitUntil { viewModel.activeSession.value?.isFullyCompleted == true }
+        viewModel.closeActiveInvoice()
+        waitUntil {
+            viewModel.activeSession.value == null &&
+                viewModel.incompleteInvoices.value.none { it.invoiceNo == "20450101" } &&
+                viewModel.completedInvoices.value.any { it.invoiceNo == "20450101" }
+        }
+
+        // 6. Completed invoice reopen triggers Supervisor override when enabled, and bypasses when disabled for trial
+        viewModel.reopenCompletedInvoice("20450101")
+        assertEquals(SupervisorOverrideActionType.REOPEN_COMPLETED_INVOICE, viewModel.pendingSupervisorOverride.value?.actionType)
+        viewModel.dismissSupervisorOverride()
+
+        viewModel.updateSettings { it.copy(requireSupervisorOverride = false) }
+        waitUntil { !viewModel.settings.value.requireSupervisorOverride }
+
+        viewModel.reopenCompletedInvoice("20450101")
+        waitUntil { viewModel.activeSession.value?.invoiceNo == "20450101" }
+        assertNull(viewModel.pendingSupervisorOverride.value)
+        viewModel.closeActiveInvoice()
+        waitUntil { viewModel.completedInvoices.value.any { it.invoiceNo == "20450101" } }
     }
 }

@@ -158,6 +158,9 @@ interface WmsDao {
     @Query("SELECT * FROM app_users")
     fun observeAppUsers(): Flow<List<AppUserEntity>>
 
+    @Query("SELECT * FROM app_users")
+    suspend fun getAllAppUsers(): List<AppUserEntity>
+
     @Query("SELECT COUNT(*) FROM app_users")
     suspend fun getAppUserCount(): Int
 

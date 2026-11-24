@@ -288,4 +288,19 @@ class WmsRepository(
     suspend fun exportReturnPdf(report: ReturnReport): Result<File> = withContext(ioDispatcher) {
         PdfService.exportReturnReportPdf(context, report)
     }
+
+    suspend fun exportIncompleteInvoicesPdf(
+        auditorName: String,
+        auditorId: String,
+        records: List<IncompleteInvoiceRecord>,
+        isRtl: Boolean = true
+    ): Result<File> = withContext(ioDispatcher) {
+        PdfService.exportIncompleteInvoicesPdf(
+            context = context,
+            auditorName = auditorName,
+            auditorId = auditorId,
+            records = records,
+            isRtl = isRtl
+        )
+    }
 }

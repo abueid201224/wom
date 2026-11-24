@@ -239,6 +239,86 @@ object PdfService {
         }
     }
 
+    fun exportIncompleteInvoicesPdf(
+        context: Context,
+        auditorName: String,
+        auditorId: String,
+        records: List<IncompleteInvoiceRecord>,
+        isRtl: Boolean = true
+    ): Result<File> {
+        return runCatching {
+            val doc = PdfDocument()
+            var pageNum = 1
+            var page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNum).create())
+            var canvas = page.canvas
+
+            val totalMissing = records.sumOf { it.missingQty }
+            val title = if (isRtl) "تقرير فواتير غير مكتملة (مرحّلة مع النواقص)" else "Incomplete Invoices Report (Deferred with Shortages)"
+            val sub1 = if (isRtl) "المُعِد: $auditorName ($auditorId) • عدد الفواتير: ${records.size}" else "Prepared by: $auditorName ($auditorId) • Invoices: ${records.size}"
+            val sub2 = if (isRtl) "إجمالي النواقص المسجلة: $totalMissing قطعة" else "Total Recorded Shortages: $totalMissing pcs"
+
+            var y = drawHeader(canvas, title, sub1, sub2, isRtl)
+
+            val sectionPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(15, 23, 42)
+                textSize = 11f
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            val rowPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(51, 65, 85)
+                textSize = 10f
+            }
+
+            fun drawLine(text: String, paint: TextPaint, gap: Float = 4f) {
+                val layout = buildStaticLayout(text, paint, CONTENT_WIDTH, isRtl)
+                if (y + layout.height + gap > PAGE_HEIGHT - 64f) {
+                    doc.finishPage(page)
+                    pageNum++
+                    page = doc.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNum).create())
+                    canvas = page.canvas
+                    y = MARGIN
+                }
+                canvas.save()
+                canvas.translate(MARGIN, y)
+                layout.draw(canvas)
+                canvas.restore()
+                y += layout.height + gap
+            }
+
+            if (records.isEmpty()) {
+                drawLine(
+                    if (isRtl) "لا توجد فواتير غير مكتملة مسجلة حالياً." else "No incomplete invoices currently recorded.",
+                    rowPaint,
+                    6f
+                )
+            } else {
+                for (rec in records) {
+                    val invHeader = if (isRtl) {
+                        "فاتورة ${rec.invoiceNo} | ممسوح: ${rec.scannedQty}/${rec.totalRequiredQty} | نواقص: ${rec.missingQty} | محاولات الترحيل: ${rec.deferCount}"
+                    } else {
+                        "Invoice ${rec.invoiceNo} | Scanned: ${rec.scannedQty}/${rec.totalRequiredQty} | Missing: ${rec.missingQty} | Deferrals: ${rec.deferCount}"
+                    }
+                    drawLine(invHeader, sectionPaint, 5f)
+                    for (item in rec.shortageItemsSnapshot) {
+                        val line = if (isRtl) {
+                            "  • ${item.itemCode} | ${item.itemName.take(26)} | مطلوب: ${item.requiredQty} | فعلي: ${item.actualQty} | فرق: ${item.difference}"
+                        } else {
+                            "  • ${item.itemCode} | ${item.itemName.take(26)} | Req: ${item.requiredQty} | Act: ${item.actualQty} | Diff: ${item.difference}"
+                        }
+                        drawLine(line, rowPaint, 3f)
+                    }
+                    y += 6f
+                }
+            }
+
+            doc.finishPage(page)
+            val outFile = savePdfFile(context, "Incomplete_Invoices_${System.currentTimeMillis()}.pdf", doc)
+            doc.close()
+            sharePdfFile(context, outFile)
+            outFile
+        }
+    }
+
     private fun buildStaticLayout(
         text: String,
         paint: TextPaint,

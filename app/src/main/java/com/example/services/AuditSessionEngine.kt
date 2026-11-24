@@ -17,6 +17,7 @@ import kotlin.math.roundToInt
 object AuditSessionEngine {
 
     const val DOUBLE_SCAN_WINDOW_MS = 2000L
+    const val MAX_FREE_DEFER_ATTEMPTS = 5
 
     sealed interface ItemScanOutcome {
         data class Updated(
@@ -280,6 +281,84 @@ object AuditSessionEngine {
     }
 
     /**
+     * Requires Supervisor override AFTER the 5th deferral attempt (attempt #6+),
+     * never on attempts 1..5, unless the user is already a Supervisor or the override gate is disabled for trial.
+     */
+    fun requiresSupervisorForDefer(
+        currentDeferCount: Int,
+        userRole: UserRole,
+        requireSupervisorOverride: Boolean
+    ): Boolean {
+        if (!requireSupervisorOverride) return false
+        if (userRole == UserRole.SUPERVISOR) return false
+        return currentDeferCount >= MAX_FREE_DEFER_ATTEMPTS
+    }
+
+    /**
+     * Builds a deferred ("ترحيل للاستكمال") invoice record preserving deferCount and optional shortage snapshot
+     * for the "فواتير غير مكتملة" report.
+     */
+    fun buildDeferredInvoiceRecord(
+        session: ActiveInvoiceSession,
+        auditorName: String,
+        auditorId: String,
+        recordShortagesReport: Boolean,
+        nowIso: String = Instant.now().toString()
+    ): IncompleteInvoiceRecord {
+        val nextDeferCount = session.deferCount + 1
+        val updatedSession = session.copy(
+            deferCount = nextDeferCount,
+            auditorSignature = null,
+            lastActivityAt = nowIso,
+            lastCheckpointAtMs = System.currentTimeMillis()
+        )
+        val items = updatedSession.items.values
+        val completedCount = items.count { it.qtyStatus == QtyStatus.EXACT && it.codeStatus == CodeStatus.MATCH }
+        val totalReq = items.sumOf { it.requiredQty }
+        val scannedQty = items.sumOf { it.actualQty }
+        val missingQty = (totalReq - scannedQty).coerceAtLeast(0)
+
+        val shortages = if (recordShortagesReport) {
+            items.filter { it.actualQty < it.requiredQty || it.qtyStatus != QtyStatus.EXACT }
+                .map { item ->
+                    AuditDiscrepancy(
+                        orderNo = updatedSession.orderNo,
+                        invoiceNo = updatedSession.invoiceNo,
+                        itemCode = item.itemCode,
+                        itemName = item.itemName,
+                        unit = item.unit,
+                        requiredQty = item.requiredQty,
+                        actualQty = item.actualQty,
+                        codeStatus = item.codeStatus,
+                        qtyStatus = item.qtyStatus,
+                        difference = item.actualQty - item.requiredQty,
+                        auditedAt = nowIso,
+                        auditorName = auditorName,
+                        auditorId = auditorId,
+                        notes = "ترحيل للاستكمال مع تسجيل النواقص (محاولة #$nextDeferCount)"
+                    )
+                }
+        } else emptyList()
+
+        return IncompleteInvoiceRecord(
+            invoiceNo = updatedSession.invoiceNo,
+            orderNo = updatedSession.orderNo,
+            auditorName = auditorName,
+            auditorId = auditorId,
+            savedAt = nowIso,
+            session = updatedSession,
+            completedItemsCount = completedCount,
+            totalItemsCount = items.size,
+            missingQty = missingQty,
+            scannedQty = scannedQty,
+            totalRequiredQty = totalReq,
+            deferCount = nextDeferCount,
+            recordShortagesReport = recordShortagesReport,
+            shortageItemsSnapshot = shortages
+        )
+    }
+
+    /**
      * Computes full-session totals strictly WITHOUT cross-item compensation:
      * accuracy = (totalRequiredQty - (totalShortageQty + totalSurplusQty)) / totalRequiredQty
      */
@@ -289,7 +368,8 @@ object AuditSessionEngine {
         history: List<InvoiceAuditHistory>,
         rawDiscrepancies: List<AuditDiscrepancy>,
         snapshots: List<DailyAuditSnapshot>,
-        activeSession: ActiveInvoiceSession?
+        activeSession: ActiveInvoiceSession?,
+        incomplete: List<IncompleteInvoiceRecord> = emptyList()
     ): SessionApprovalSummary {
         val disc = deduplicateDiscrepancies(rawDiscrepancies)
         val allMasterInvoices = master.map { it.invoiceNo }.distinct()
@@ -348,7 +428,10 @@ object AuditSessionEngine {
                 .coerceIn(0, 100)
         } else 0
 
-        val isAllDone = allMasterInvoices.isNotEmpty() && remainingCount == 0 && activeSession == null
+        val isAllDone = allMasterInvoices.isNotEmpty() &&
+            remainingCount == 0 &&
+            incomplete.isEmpty() &&
+            activeSession == null
         val latestSnapshot = snapshots.firstOrNull()
         val latestCompletedAt = completed.maxOfOrNull { it.completedAt } ?: ""
         val isApproved = isAllDone &&
@@ -359,6 +442,8 @@ object AuditSessionEngine {
         return SessionApprovalSummary(
             totalMasterInvoices = allMasterInvoices.size,
             auditedInvoicesCount = invoiceDetails.size,
+            deferredInvoicesCount = incomplete.size,
+            incompleteShortageInvoicesCount = incomplete.count { it.recordShortagesReport },
             remainingInvoicesCount = remainingCount,
             exactInvoicesCount = exactInvCount,
             discrepancyInvoicesCount = discInvCount,

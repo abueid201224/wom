@@ -99,6 +99,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
     val sessionApprovalSummary by viewModel.sessionApprovalSummary.collectAsStateWithLifecycle()
     val showSessionApprovalModal by viewModel.showSessionApprovalModal.collectAsStateWithLifecycle()
     val pendingInvoiceSwitch by viewModel.pendingInvoiceSwitch.collectAsStateWithLifecycle()
+    val pendingSupervisorOverride by viewModel.pendingSupervisorOverride.collectAsStateWithLifecycle()
 
     DisposableEffect(context) {
         val receiver = PdaBroadcastScanner.register(context) { scannedCode ->
@@ -202,10 +203,20 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
             FullSessionApprovalDialog(
                 isRtl = isRtl,
                 auditorName = settings.auditorName,
+                currentUser = currentUser,
                 summary = sessionApprovalSummary,
                 onDismiss = { viewModel.dismissSessionApprovalModal() },
                 onApproveWithSignature = { sig -> viewModel.approveFullSessionReport(sig) },
+                onSwitchToTrialAuditor = { viewModel.switchToTrialAuditor() },
                 onExportPdf = { viewModel.exportDiscrepanciesPdf() }
+            )
+        }
+        pendingSupervisorOverride?.let { overridePrompt ->
+            SupervisorOverrideDialog(
+                isRtl = isRtl,
+                pending = overridePrompt,
+                onAuthorize = { pin -> viewModel.authorizeSupervisorOverride(pin) },
+                onDismiss = { viewModel.dismissSupervisorOverride() }
             )
         }
 
@@ -391,6 +402,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         isRtl = isRtl,
                                         firebaseUser = firebaseUser,
                                         currentUser = currentUser,
+                                        settings = settings,
                                         isAuthBusy = isAuthBusy,
                                         onSignInGoogle = { act ->
                                             viewModel.signInWithGoogle(act) {
@@ -403,6 +415,15 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                             navController.navigate(WmsRoute.Dashboard) {
                                                 popUpTo(WmsRoute.Auth) { inclusive = true }
                                             }
+                                        },
+                                        onConfigureSupervisorPin = { pin ->
+                                            viewModel.configureSupervisorPin(pin)
+                                        },
+                                        onSwitchToTrialAuditor = {
+                                            viewModel.switchToTrialAuditor()
+                                        },
+                                        onToggleSupervisorGate = { enabled ->
+                                            viewModel.updateSettings { it.copy(requireSupervisorOverride = enabled) }
                                         },
                                         onOpenOperators = { showOperatorsModal = true },
                                         onToggleLanguage = {
@@ -446,6 +467,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                          activeSession = activeSession,
                                          masterItems = masterItems,
                                          completedInvoices = completedInvoices,
+                                         incompleteInvoices = incompleteInvoices,
                                          auditKpis = auditKpis,
                                          sessionSummary = sessionApprovalSummary,
                                          scanBanner = scanBanner,
@@ -464,7 +486,8 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                          onOpenInvoice = { inv -> viewModel.startOrOpenInvoice(inv) },
                                          onProcessScan = { raw -> viewModel.processAuditScan(raw, bypassDebounce = true) },
                                          onAdjustQty = { key, delta -> viewModel.adjustAuditItemQty(key, delta) },
-                                         onSuspendSession = { viewModel.suspendCurrentSessionToIncomplete() },
+                                         onSuspendSession = { viewModel.deferCurrentInvoiceForCompletion(recordShortages = false) },
+                                         onDeferWithShortages = { viewModel.deferCurrentInvoiceForCompletion(recordShortages = true) },
                                          onCloseInvoice = { viewModel.closeActiveInvoice() },
                                          onOpenSessionApproval = { viewModel.openSessionApprovalModal() },
                                          onExportSessionPdf = { viewModel.exportDiscrepanciesPdf() },
@@ -533,8 +556,14 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         discrepancies = discrepancies,
                                         wrongPicks = wrongPicks,
                                         auditHistory = auditHistory,
+                                        incompleteInvoices = incompleteInvoices,
                                         sessionSummary = sessionApprovalSummary,
                                         onOpenSessionApproval = { viewModel.openSessionApprovalModal() },
+                                        onOpenDeferredInvoice = { inv ->
+                                            viewModel.startOrOpenInvoice(inv)
+                                            navigateTo(WmsRoute.ActiveAudit)
+                                        },
+                                        onExportIncompletePdf = { viewModel.exportIncompleteInvoicesPdf() },
                                         onExportCsv = { viewModel.exportDiscrepanciesCsv() },
                                         onExportPdf = { viewModel.exportDiscrepanciesPdf() },
                                         onDeleteDiscrepancy = { id -> viewModel.deleteDiscrepancy(id) },
@@ -591,6 +620,7 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         isRtl = isRtl,
                                         masterItems = masterItems,
                                         completedInvoices = completedInvoices,
+                                        incompleteInvoices = incompleteInvoices,
                                         packagingRules = packagingRules,
                                         onOpenInvoiceInAudit = { inv ->
                                             viewModel.startOrOpenInvoice(inv)
@@ -608,6 +638,8 @@ fun WmsAuditorAppRoot(viewModel: WmsViewModel) {
                                         currentUser = currentUser,
                                         firebaseUser = firebaseUser,
                                         onUpdateSettings = { fn -> viewModel.updateSettings(fn) },
+                                        onConfigureSupervisorPin = { pin -> viewModel.configureSupervisorPin(pin) },
+                                        onSwitchToTrialAuditor = { viewModel.switchToTrialAuditor() },
                                         onOpenOperators = { showOperatorsModal = true },
                                         onOpenCloudSync = { showCloudModal = true },
                                         onOpenGuide = { showGuideModal = true }

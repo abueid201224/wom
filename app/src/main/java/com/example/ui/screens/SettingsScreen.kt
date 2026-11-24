@@ -15,9 +15,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.model.AppSettings
 import com.example.model.AppUser
+import com.example.model.UserRole
 import com.example.ui.WmsStrings
 import com.example.ui.components.AuditorSignatureModal
 import com.example.ui.components.StatusPill
+import com.example.ui.components.SupervisorPinSetupDialog
 import com.example.ui.theme.*
 import com.google.firebase.auth.FirebaseUser
 
@@ -28,12 +30,15 @@ fun SettingsScreen(
     currentUser: AppUser,
     firebaseUser: FirebaseUser?,
     onUpdateSettings: ((AppSettings) -> AppSettings) -> Unit,
+    onConfigureSupervisorPin: (String) -> Boolean = { false },
+    onSwitchToTrialAuditor: () -> Unit = {},
     onOpenOperators: () -> Unit,
     onOpenCloudSync: () -> Unit,
     onOpenGuide: () -> Unit
 ) {
     val s = WmsStrings(isRtl)
     var showSignatureModal by remember { mutableStateOf(false) }
+    var showSupervisorPinModal by remember { mutableStateOf(false) }
 
     if (showSignatureModal) {
         AuditorSignatureModal(
@@ -44,6 +49,15 @@ fun SettingsScreen(
                 showSignatureModal = false
                 onUpdateSettings { it.copy(auditorSignatureBase64 = b64) }
             }
+        )
+    }
+
+    if (showSupervisorPinModal) {
+        SupervisorPinSetupDialog(
+            isRtl = isRtl,
+            isConfigured = settings.supervisorPinConfigured,
+            onSavePin = onConfigureSupervisorPin,
+            onDismiss = { showSupervisorPinModal = false }
         )
     }
 
@@ -70,7 +84,7 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(currentUser.name, style = MaterialTheme.typography.titleMedium, color = Slate100)
                         Text("${currentUser.jobId} • ${settings.auditorTitle}", style = MaterialTheme.typography.bodySmall, color = Emerald400)
                     }
@@ -81,6 +95,23 @@ fun SettingsScreen(
                             .testTag("settings_switch_operator_button")
                     ) {
                         Text(s.t("تبديل الحساب", "Switch Role"), color = Cyan400)
+                    }
+                }
+
+                if (currentUser.role != UserRole.AUDITOR) {
+                    OutlinedButton(
+                        onClick = onSwitchToTrialAuditor,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("settings_switch_trial_auditor_button")
+                    ) {
+                        Icon(Icons.Rounded.VerifiedUser, contentDescription = null, tint = Indigo400)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            s.t("التبديل إلى حساب المدقق التجريبي الافتراضي", "Switch to Trial Auditor Account"),
+                            color = Indigo400
+                        )
                     }
                 }
 
@@ -118,6 +149,81 @@ fun SettingsScreen(
                         Icon(Icons.Rounded.Draw, contentDescription = null, tint = Emerald400)
                         Spacer(Modifier.width(6.dp))
                         Text(s.t("توقيع", "Sign"), color = Slate100)
+                    }
+                }
+            }
+        }
+
+        // Supervisor Governance & Trial Mode Toggle Card
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            color = Slate900,
+            border = BorderStroke(1.dp, Amber500.copy(alpha = 0.4f))
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, tint = Amber400)
+                        Text(
+                            s.t("صلاحيات المشرف وفترة التجربة", "Supervisor Override & Trial Mode"),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Amber400
+                        )
+                    }
+                    StatusPill(
+                        label = if (settings.requireSupervisorOverride) s.t("مفعّل", "Enforced") else s.t("وضع التجربة", "Trial Bypass"),
+                        color = if (settings.requireSupervisorOverride) Amber400 else Cyan400
+                    )
+                }
+
+                SettingSwitchRow(
+                    title = s.t(
+                        "طلب تمرير المشرف برمزه (بعد المحاولة 5 وإعادة الفتح — عطّله للتجربة)",
+                        "Require Supervisor PIN Override (after 5th deferral & reopen)"
+                    ),
+                    checked = settings.requireSupervisorOverride,
+                    tag = "settings_supervisor_gate_switch"
+                ) { checked -> onUpdateSettings { it.copy(requireSupervisorOverride = checked) } }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(s.t("رمز تمرير المشرف (PIN)", "Supervisor Override PIN"), color = Slate200)
+                        Text(
+                            if (settings.supervisorPinConfigured)
+                                s.t("معيّن ومحفوظ بنجاح", "Configured & Active")
+                            else
+                                s.t("غير معيّن بعد (الافتراضي 1234)", "Not yet configured (default 1234)"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (settings.supervisorPinConfigured) Emerald400 else Amber400
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { showSupervisorPinModal = true },
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("settings_configure_supervisor_pin_button")
+                    ) {
+                        Icon(Icons.Rounded.Key, contentDescription = null, tint = Amber400)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (settings.supervisorPinConfigured) s.t("تعديل الرمز", "Change PIN")
+                            else s.t("تعيين الرمز", "Set PIN"),
+                            color = Slate100
+                        )
                     }
                 }
             }

@@ -20,7 +20,9 @@ data class RolePermissionConfig(
     val canManageReturns: Boolean,
     val canApproveLab: Boolean,
     val canSignReports: Boolean,
+    val canApproveSession: Boolean,
     val canReopenDocuments: Boolean,
+    val canAuthorizeOverrides: Boolean,
     val canExportExcel: Boolean,
     val canManageUsers: Boolean
 )
@@ -34,7 +36,8 @@ val ROLE_DEFINITIONS: Map<UserRole, RolePermissionConfig> = mapOf(
         descriptionEn = "Demo exploration, read-only guide & database access",
         canAudit = false, canReceive = false, canCount = false, canPick = false,
         canManageReturns = false, canApproveLab = false, canSignReports = false,
-        canReopenDocuments = false, canExportExcel = false, canManageUsers = false
+        canApproveSession = false, canReopenDocuments = false, canAuthorizeOverrides = false,
+        canExportExcel = false, canManageUsers = false
     ),
     UserRole.WAREHOUSE_KEEPER to RolePermissionConfig(
         role = UserRole.WAREHOUSE_KEEPER,
@@ -44,27 +47,30 @@ val ROLE_DEFINITIONS: Map<UserRole, RolePermissionConfig> = mapOf(
         descriptionEn = "Receiving, physical cycle count, wave picking & barcode scans",
         canAudit = true, canReceive = true, canCount = true, canPick = true,
         canManageReturns = true, canApproveLab = false, canSignReports = false,
-        canReopenDocuments = false, canExportExcel = true, canManageUsers = false
+        canApproveSession = false, canReopenDocuments = false, canAuthorizeOverrides = false,
+        canExportExcel = true, canManageUsers = false
     ),
     UserRole.SUPERVISOR to RolePermissionConfig(
         role = UserRole.SUPERVISOR,
         labelAr = "مشرف مستودع",
         labelEn = "Warehouse Supervisor",
-        descriptionAr = "مراجعة الفروقات، فتح المستندات المقفلة، تصدير التقارير، تعيين فرق العمل",
-        descriptionEn = "Discrepancy review, reopen closed docs, wave assignments & reports",
+        descriptionAr = "مراجعة الفروقات، تمرير الصلاحيات برمز المشرف، إعادة فتح الفواتير، إدارة الفرق (الاعتماد النهائي للمدقق)",
+        descriptionEn = "Override authorization via Supervisor PIN, reopen docs, manage teams (session closure is Auditor-only)",
         canAudit = true, canReceive = true, canCount = true, canPick = true,
-        canManageReturns = true, canApproveLab = true, canSignReports = true,
-        canReopenDocuments = true, canExportExcel = true, canManageUsers = true
+        canManageReturns = true, canApproveLab = true, canSignReports = false,
+        canApproveSession = false, canReopenDocuments = true, canAuthorizeOverrides = true,
+        canExportExcel = true, canManageUsers = true
     ),
     UserRole.AUDITOR to RolePermissionConfig(
         role = UserRole.AUDITOR,
-        labelAr = "مراجع / مدقق رقابي",
+        labelAr = "مدقق / مراجع رقابي",
         labelEn = "Auditor / Quality Inspector",
-        descriptionAr = "تدقيق ومطابقة الفواتير، التحكيم المخبري للمرتجعات، التوقيع الرقمي المعتمد، رقابة ISA 500",
-        descriptionEn = "Dispatch audit, ISA 500 compliance, lab arbitration & certified signatures",
+        descriptionAr = "تدقيق الفواتير، الترحيل للاستكمال، اعتماد وإنهاء الجلسة بالتوقيع المعتمد، رقابة ISA 500",
+        descriptionEn = "Dispatch audit, deferrals for completion, final session approval & ISA 500 compliance",
         canAudit = true, canReceive = true, canCount = true, canPick = true,
         canManageReturns = true, canApproveLab = true, canSignReports = true,
-        canReopenDocuments = true, canExportExcel = true, canManageUsers = true
+        canApproveSession = true, canReopenDocuments = false, canAuthorizeOverrides = false,
+        canExportExcel = true, canManageUsers = false
     )
 )
 
@@ -135,7 +141,8 @@ data class ActiveInvoiceSession(
     val items: Map<String, ScannedAuditItem> = emptyMap(),
     val isLocked: Boolean = false,
     val lastScannedItemCode: String? = null,
-    val longBarcodePolicy: LongBarcodePolicy = LongBarcodePolicy.ASK
+    val longBarcodePolicy: LongBarcodePolicy = LongBarcodePolicy.ASK,
+    val deferCount: Int = 0
 ) {
     val totalRequiredQty: Int get() = items.values.sumOf { it.requiredQty }
     val totalScannedQty: Int get() = items.values.sumOf { it.actualQty }
@@ -155,6 +162,7 @@ data class ActiveInvoiceSession(
 data class AuditScanningKpis(
     val totalInvoices: Int = 0,
     val completedInvoices: Int = 0,
+    val deferredInvoices: Int = 0,
     val remainingInvoices: Int = 0,
     val totalRequiredQty: Int = 0,
     val totalScannedQty: Int = 0,
@@ -174,6 +182,22 @@ data class PendingInvoiceSwitchConfirmation(
     val expiresAtMs: Long
 )
 
+enum class SupervisorOverrideActionType {
+    DEFER_BEYOND_LIMIT,
+    REOPEN_COMPLETED_INVOICE
+}
+
+data class PendingSupervisorOverride(
+    val actionType: SupervisorOverrideActionType,
+    val invoiceNo: String,
+    val recordShortages: Boolean = false,
+    val attemptNumber: Int = 0,
+    val titleAr: String,
+    val titleEn: String,
+    val messageAr: String,
+    val messageEn: String
+)
+
 @Serializable
 data class IncompleteInvoiceRecord(
     val invoiceNo: String,
@@ -186,7 +210,10 @@ data class IncompleteInvoiceRecord(
     val totalItemsCount: Int,
     val missingQty: Int,
     val scannedQty: Int,
-    val totalRequiredQty: Int
+    val totalRequiredQty: Int,
+    val deferCount: Int = 1,
+    val recordShortagesReport: Boolean = false,
+    val shortageItemsSnapshot: List<AuditDiscrepancy> = emptyList()
 )
 
 @Serializable
@@ -274,6 +301,8 @@ data class SessionInvoiceDetailRow(
 data class SessionApprovalSummary(
     val totalMasterInvoices: Int = 0,
     val auditedInvoicesCount: Int = 0,
+    val deferredInvoicesCount: Int = 0,
+    val incompleteShortageInvoicesCount: Int = 0,
     val remainingInvoicesCount: Int = 0,
     val exactInvoicesCount: Int = 0,
     val discrepancyInvoicesCount: Int = 0,
@@ -597,12 +626,15 @@ data class AppSettings(
     val scannerMinLength: Int = 3,
     val autoSwitchOnNewInvoice: Boolean = true,
     val requireDoubleScanToSwitchInvoice: Boolean = false,
+    val requireSupervisorOverride: Boolean = true,
+    val supervisorPinConfigured: Boolean = false,
+    val supervisorPinCode: String = "",
     val itemSortMode: ItemSortMode = ItemSortMode.LAST_SCANNED,
     val enableCameraQr: Boolean = true,
     val longBarcodeThreshold: Int = 10,
     val auditorName: String = "أحمد حمادة",
-    val auditorId: String = "AUD-101",
-    val auditorTitle: String = "مدير ومراقب عمليات المستودع",
+    val auditorId: String = "SUP-101",
+    val auditorTitle: String = "مشرف عمليات المستودع",
     val auditorSignatureBase64: String? = null
 )
 

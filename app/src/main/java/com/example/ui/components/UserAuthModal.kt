@@ -96,7 +96,10 @@ fun UserAuthModal(
                                 color = Slate100
                             )
                             Text(
-                                text = s.t("الرمز الافتراضي التجريبي: 1234 (أو 0000 للضيف)", "Demo PIN: 1234 (0000 for Guest)"),
+                                text = if (target.role == UserRole.SUPERVISOR)
+                                    s.t("أدخل رمز المشرف المعتمد (الافتراضي قبل التعيين: 1234)", "Enter Supervisor PIN (default before setup: 1234)")
+                                else
+                                    s.t("الرمز الافتراضي للمدقق التجريبي والمشغلين: 1234", "Trial Auditor & Operator PIN: 1234"),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Slate400
                             )
